@@ -31,14 +31,14 @@ impl<State: SemaphoreState + std::fmt::Debug> std::fmt::Debug for Semaphore<Stat
     }
 }
 
-struct StateWrapper<State: SemaphoreState> {
+struct StateWrapper<State> {
     inner: State,
-    leader: LeaderState<State::Params>,
+    leader: LeaderState,
 }
 
-enum LeaderState<P> {
-    Registered(Waker, P),
-    Woken(P),
+enum LeaderState {
+    Registered(Waker),
+    Woken,
     Empty,
 }
 
@@ -54,17 +54,17 @@ impl Queue {
         Self { notify, fifo }
     }
 
-    fn notify<S: SemaphoreState>(&self, lock: &mut StateWrapper<S>) {
+    fn notify<S>(&self, lock: &mut StateWrapper<S>) {
         let leader = core::mem::replace(&mut lock.leader, LeaderState::Empty);
         match leader {
             // wake the leader
-            LeaderState::Registered(waker, permit) => {
-                lock.leader = LeaderState::Woken(permit);
+            LeaderState::Registered(waker) => {
+                lock.leader = LeaderState::Woken;
                 waker.wake()
             }
             // do nothing, it's up to the leader now
-            LeaderState::Woken(permit) => {
-                lock.leader = LeaderState::Woken(permit);
+            LeaderState::Woken => {
+                lock.leader = LeaderState::Woken;
             }
             // reset back to empty, notify the queue
             LeaderState::Empty => {
@@ -152,24 +152,25 @@ impl<State: SemaphoreState> Semaphore<State> {
                 notified.set(None);
 
                 state = self.state.lock().unwrap();
-                state.leader = LeaderState::Woken(params.take().unwrap());
+                state.leader = LeaderState::Woken;
             } else {
                 state = self.state.lock().unwrap();
             }
 
             match core::mem::replace(&mut state.leader, LeaderState::Empty) {
                 // spurious wakeup
-                LeaderState::Registered(mut waker, params) => {
+                LeaderState::Registered(mut waker) => {
                     if !cx.waker().will_wake(&waker) {
                         waker = cx.waker().clone();
                     }
-                    state.leader = LeaderState::Registered(waker, params);
+                    state.leader = LeaderState::Registered(waker);
                     Poll::Pending
                 }
                 // woken
-                LeaderState::Woken(params) => match state.inner.acquire(params) {
-                    Err(params) => {
-                        state.leader = LeaderState::Registered(cx.waker().clone(), params);
+                LeaderState::Woken => match state.inner.acquire(params.take().unwrap()) {
+                    Err(p) => {
+                        state.leader = LeaderState::Registered(cx.waker().clone());
+                        params = Some(p);
                         Poll::Pending
                     }
                     Ok(permit) => {
