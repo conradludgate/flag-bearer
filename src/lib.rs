@@ -1,34 +1,49 @@
 use std::{
     future::poll_fn,
     mem::ManuallyDrop,
-    sync::Mutex,
-    task::{Poll, Waker},
+    pin::pin,
+    sync::{Mutex, TryLockError},
+    task::{Poll, Waker, ready},
 };
 
-use tokio::sync::Notify;
+use tokio::sync::{Notify, futures::Notified};
 
-#[derive(Debug)]
-pub struct Semaphore<State> {
+pub struct Semaphore<State: SemaphoreState> {
     state: Mutex<StateWrapper<State>>,
     queue: Queue,
 }
 
-#[derive(Debug)]
-struct StateWrapper<State> {
-    inner: State,
-    leader: LeaderState,
+impl<State: SemaphoreState + std::fmt::Debug> std::fmt::Debug for Semaphore<State> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let mut d = f.debug_struct("Semaphore");
+        match self.state.try_lock() {
+            Ok(guard) => {
+                d.field("state", &guard.inner);
+            }
+            Err(TryLockError::Poisoned(err)) => {
+                d.field("state", &err.get_ref().inner);
+            }
+            Err(TryLockError::WouldBlock) => {
+                d.field("state", &format_args!("<locked>"));
+            }
+        }
+        d.finish_non_exhaustive()
+    }
 }
 
-#[derive(Debug)]
-enum LeaderState {
-    Registered(Waker),
-    Woken,
+struct StateWrapper<State: SemaphoreState> {
+    inner: State,
+    leader: LeaderState<State::Params>,
+}
+
+enum LeaderState<P> {
+    Registered(Waker, P),
+    Woken(P),
     Empty,
 }
 
 #[derive(Debug)]
 struct Queue {
-    // leader: DiatomicWaker,
     notify: Notify,
     fifo: bool,
 }
@@ -36,24 +51,23 @@ struct Queue {
 impl Queue {
     fn new(fifo: bool) -> Self {
         let notify = Notify::new();
-        Self {
-            // leader: None,
-            notify,
-            fifo,
-        }
+        Self { notify, fifo }
     }
 
-    fn notify<S>(&self, lock: &mut StateWrapper<S>) {
-        let leader = core::mem::replace(&mut lock.leader, LeaderState::Woken);
+    fn notify<S: SemaphoreState>(&self, lock: &mut StateWrapper<S>) {
+        let leader = core::mem::replace(&mut lock.leader, LeaderState::Empty);
         match leader {
             // wake the leader
-            LeaderState::Registered(waker) => waker.wake(),
+            LeaderState::Registered(waker, permit) => {
+                lock.leader = LeaderState::Woken(permit);
+                waker.wake()
+            }
             // do nothing, it's up to the leader now
-            LeaderState::Woken => {}
+            LeaderState::Woken(permit) => {
+                lock.leader = LeaderState::Woken(permit);
+            }
             // reset back to empty, notify the queue
             LeaderState::Empty => {
-                lock.leader = LeaderState::Empty;
-
                 if self.fifo {
                     self.notify.notify_one();
                 } else {
@@ -63,8 +77,8 @@ impl Queue {
         }
     }
 
-    async fn wait(&self) {
-        self.notify.notified().await
+    fn wait(&self) -> Notified<'_> {
+        self.notify.notified()
     }
 }
 
@@ -128,56 +142,48 @@ impl<State: SemaphoreState> Semaphore<State> {
     }
 
     pub async fn acquire(&self, params: State::Params) -> Permit<'_, State> {
-        self.queue.wait().await;
+        let mut notified = pin!(Some(self.queue.wait()));
+        let mut params = Some(params);
 
-        struct AcquireState<'a, S: SemaphoreState> {
-            semaphore: &'a Semaphore<S>,
-            params: Option<S::Params>,
-        }
+        poll_fn(|cx| {
+            let mut state;
+            if let Some(n) = notified.as_mut().as_pin_mut() {
+                ready!(n.poll(cx));
+                notified.set(None);
 
-        impl<S: SemaphoreState> Drop for AcquireState<'_, S> {
-            fn drop(&mut self) {
-                // params are queue up, so we are the leader
-                if let Some(_params) = self.params.take() {
-                    let mut state = self.semaphore.state.lock().unwrap();
-                    let leader = core::mem::replace(&mut state.leader, LeaderState::Empty);
-
-                    // we must notify the next in the queue
-                    if let LeaderState::Woken = leader {
-                        self.semaphore.queue.notify(&mut state);
-                    }
-                }
+                state = self.state.lock().unwrap();
+                state.leader = LeaderState::Woken(params.take().unwrap());
+            } else {
+                state = self.state.lock().unwrap();
             }
-        }
 
-        // we will never have to drop it - it should be dropped by acquire_permit.
-        let mut acq = AcquireState {
-            semaphore: self,
-            params: Some(params),
-        };
-        poll_fn(move |cx| {
-            let params = acq.params.take().unwrap();
-
-            let mut state = acq.semaphore.state.lock().unwrap();
-            state.leader = LeaderState::Empty;
-
-            match state.inner.acquire(params) {
-                Err(p) => {
-                    state.leader = LeaderState::Registered(cx.waker().clone());
-                    acq.params = Some(p);
-
+            match core::mem::replace(&mut state.leader, LeaderState::Empty) {
+                // spurious wakeup
+                LeaderState::Registered(mut waker, params) => {
+                    if !cx.waker().will_wake(&waker) {
+                        waker = cx.waker().clone();
+                    }
+                    state.leader = LeaderState::Registered(waker, params);
                     Poll::Pending
                 }
-                Ok(permit) => {
-                    if state.inner.permits_available() {
-                        self.queue.notify(&mut state);
+                // woken
+                LeaderState::Woken(params) => match state.inner.acquire(params) {
+                    Err(params) => {
+                        state.leader = LeaderState::Registered(cx.waker().clone(), params);
+                        Poll::Pending
                     }
+                    Ok(permit) => {
+                        if state.inner.permits_available() {
+                            self.queue.notify(&mut state);
+                        }
 
-                    Poll::Ready(Permit {
-                        sem: self,
-                        permit: ManuallyDrop::new(permit),
-                    })
-                }
+                        Poll::Ready(Permit {
+                            sem: self,
+                            permit: ManuallyDrop::new(permit),
+                        })
+                    }
+                },
+                LeaderState::Empty => unreachable!(),
             }
         })
         .await
@@ -191,6 +197,12 @@ pub struct Permit<'a, State: SemaphoreState> {
     permit: ManuallyDrop<State::Permit>,
 }
 
+impl<State: SemaphoreState> Permit<'_, State> {
+    pub fn permit(&self) -> &State::Permit {
+        &self.permit
+    }
+}
+
 impl<State: SemaphoreState> Drop for Permit<'_, State> {
     fn drop(&mut self) {
         let mut state = self.sem.state.lock().unwrap();
@@ -200,18 +212,7 @@ impl<State: SemaphoreState> Drop for Permit<'_, State> {
             .release(unsafe { ManuallyDrop::take(&mut self.permit) });
 
         if state.inner.permits_available() {
-            let leader = core::mem::replace(&mut state.leader, LeaderState::Woken);
-            match leader {
-                // wake the leader
-                LeaderState::Registered(waker) => waker.wake(),
-                // do nothing, it's up to the leader now
-                LeaderState::Woken => {}
-                // reset back to empty, notify the queue
-                LeaderState::Empty => {
-                    state.leader = LeaderState::Empty;
-                    self.sem.queue.notify(&mut state)
-                }
-            }
+            self.sem.queue.notify(&mut state)
         }
     }
 }
