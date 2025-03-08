@@ -10,7 +10,7 @@ You want to limit number of active HTTP requests, as well as total buffer alloca
 
 You could define the semaphore state like so.
 
-```
+```rust
 use flag_bearer::{Semaphore, SemaphoreState};
 
 #[derive(Debug)]
@@ -44,7 +44,7 @@ impl SemaphoreState for SemaphoreCounter {
     }
 }
 
-let semaphore = Semaphore::new(SemaphoreCounter {
+let semaphore = Semaphore::new_fifo(SemaphoreCounter {
     bytes: 10 * 1024 * 1024, // 10 MiB.
     requests: 10, // 10 requests.
 })
