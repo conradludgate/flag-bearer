@@ -140,13 +140,31 @@ type PinQueue<S> = dyn pin_list::Types<
         Unprotected = (),
     >;
 
+/// The trait defining how [`Semaphore`]s behave.
 pub trait SemaphoreState {
+    /// What type is used to request permits.
+    ///
+    /// An example of this could be `usize` for a counting semaphore,
+    /// if you want to support `acquire_many` type requests.
     type Params;
+
+    /// The type representing the current permit allocation.
+    ///
+    /// If you have a counting semaphore, this could be the number
+    /// of permits acquired. If this is more like a connection pool,
+    /// this could be a specific object allocation.
     type Permit;
 
     /// Acquire a permit given the params.
+    ///
+    /// If a permit could not be acquired with the params, return an error with the
+    /// original params back.
     fn acquire(&mut self, params: Self::Params) -> Result<Self::Permit, Self::Params>;
 
+    /// Return the permit back to the semaphore.
+    ///
+    /// Note: This is not guaranteed to be called for every acquire call.
+    /// Permits can be modified or forgotten.
     fn release(&mut self, permit: Self::Permit);
 }
 
