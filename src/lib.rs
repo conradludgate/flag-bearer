@@ -5,17 +5,17 @@ use pin_list::PinList;
 
 mod acquire;
 
-pub struct Semaphore<State: SemaphoreState> {
-    state: Mutex<StateWrapper<State>>,
+pub struct Semaphore<S: SemaphoreState> {
+    state: Mutex<QueueState<S>>,
     fifo: bool,
 }
 
-impl<State: SemaphoreState + std::fmt::Debug> std::fmt::Debug for Semaphore<State> {
+impl<S: SemaphoreState + std::fmt::Debug> std::fmt::Debug for Semaphore<S> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         let mut d = f.debug_struct("Semaphore");
         match self.state.try_lock() {
             Some(guard) => {
-                d.field("state", &guard.inner);
+                d.field("state", &guard.state);
             }
             None => {
                 d.field("state", &format_args!("<locked>"));
@@ -25,12 +25,12 @@ impl<State: SemaphoreState + std::fmt::Debug> std::fmt::Debug for Semaphore<Stat
     }
 }
 
-struct StateWrapper<State: SemaphoreState> {
-    inner: State,
-    queue: PinList<PinQueue<State>>,
+struct QueueState<S: SemaphoreState> {
+    queue: PinList<PinQueue<S>>,
+    state: S,
 }
 
-impl<S: SemaphoreState> StateWrapper<S> {
+impl<S: SemaphoreState> QueueState<S> {
     fn check(&mut self, fifo: bool) {
         let mut leader = if fifo {
             self.queue.cursor_front_mut()
@@ -45,7 +45,7 @@ impl<S: SemaphoreState> StateWrapper<S> {
         let params =
             p.0.take()
                 .expect("params should be in place. possibly the acquire method panicked");
-        match self.inner.acquire(params) {
+        match self.state.acquire(params) {
             Ok(permit) => match leader.remove_current(permit) {
                 Ok((_, waker)) => waker.wake(),
                 Err(_) => unreachable!("we have just made sure it is in the list"),
@@ -74,18 +74,18 @@ pub trait SemaphoreState {
     fn release(&mut self, permit: Self::Permit);
 }
 
-impl<State: SemaphoreState> Semaphore<State> {
-    pub fn new_fifo(state: State) -> Self {
+impl<S: SemaphoreState> Semaphore<S> {
+    pub fn new_fifo(state: S) -> Self {
         Self::new_inner(state, true)
     }
 
-    pub fn new_lifo(state: State) -> Self {
+    pub fn new_lifo(state: S) -> Self {
         Self::new_inner(state, false)
     }
 
-    fn new_inner(state: State, fifo: bool) -> Self {
-        let state = StateWrapper {
-            inner: state,
+    fn new_inner(state: S, fifo: bool) -> Self {
+        let state = QueueState {
+            state,
             queue: PinList::new(unsafe { pin_list::id::DebugChecked::new() }),
         };
         Self {
@@ -96,35 +96,35 @@ impl<State: SemaphoreState> Semaphore<State> {
 
     /// This gives direct access to the state, be careful not to
     /// break any of your own state invariants.
-    pub fn with_state<R>(&self, f: impl FnOnce(&mut State) -> R) -> R {
+    pub fn with_state<R>(&self, f: impl FnOnce(&mut S) -> R) -> R {
         let mut state = self.state.lock();
-        let res = f(&mut state.inner);
+        let res = f(&mut state.state);
         state.check(self.fifo);
         res
     }
 }
 
 #[derive(Debug)]
-pub struct Permit<'a, State: SemaphoreState> {
-    sem: &'a Semaphore<State>,
+pub struct Permit<'a, S: SemaphoreState> {
+    sem: &'a Semaphore<S>,
     // this is never dropped because it's returned to the semaphore on drop
-    permit: ManuallyDrop<State::Permit>,
+    permit: ManuallyDrop<S::Permit>,
 }
 
-impl<'a, State: SemaphoreState> Permit<'a, State> {
-    fn new(sem: &'a Semaphore<State>, permit: State::Permit) -> Self {
+impl<'a, S: SemaphoreState> Permit<'a, S> {
+    fn new(sem: &'a Semaphore<S>, permit: S::Permit) -> Self {
         Self {
             sem,
             permit: ManuallyDrop::new(permit),
         }
     }
 
-    pub fn permit(&self) -> &State::Permit {
+    pub fn permit(&self) -> &S::Permit {
         &self.permit
     }
 }
 
-impl<State: SemaphoreState> Drop for Permit<'_, State> {
+impl<S: SemaphoreState> Drop for Permit<'_, S> {
     fn drop(&mut self) {
         // Safety: only taken on drop.
         let permit = unsafe { ManuallyDrop::take(&mut self.permit) };

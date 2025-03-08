@@ -7,8 +7,8 @@ use pin_list::{Node, NodeData};
 
 use crate::{Permit, PinQueue, Semaphore, SemaphoreState};
 
-impl<State: SemaphoreState> Semaphore<State> {
-    pub async fn acquire(&self, params: State::Params) -> Permit<'_, State> {
+impl<S: SemaphoreState> Semaphore<S> {
+    pub async fn acquire(&self, params: S::Params) -> Permit<'_, S> {
         pin!(Acquire {
             sem: self,
             node: Node::new(),
@@ -18,14 +18,14 @@ impl<State: SemaphoreState> Semaphore<State> {
     }
 }
 pin_project_lite::pin_project! {
-    struct Acquire<'a, State: SemaphoreState> {
-        sem: &'a Semaphore<State>,
+    struct Acquire<'a, S: SemaphoreState> {
+        sem: &'a Semaphore<S>,
         #[pin]
-        node: Node<PinQueue<State>>,
-        params: Option<State::Params>,
+        node: Node<PinQueue<S>>,
+        params: Option<S::Params>,
     }
 
-    impl<'a, State: SemaphoreState> PinnedDrop for Acquire<'a, State> {
+    impl<'a, S: SemaphoreState> PinnedDrop for Acquire<'a, S> {
         fn drop(this: Pin<&mut Self>) {
             let this = this.project();
             let Some(node) = this.node.initialized_mut() else { return;};
@@ -35,7 +35,7 @@ pin_project_lite::pin_project! {
 
             // we were woken, but dropped at the same time. release the permit
             if let NodeData::Removed(permit) = data {
-                state.inner.release(permit);
+                state.state.release(permit);
             }
 
             // if we were the leader, we might have stopped some other task
@@ -45,8 +45,8 @@ pin_project_lite::pin_project! {
     }
 }
 
-impl<'a, State: SemaphoreState> Future for Acquire<'a, State> {
-    type Output = Permit<'a, State>;
+impl<'a, S: SemaphoreState> Future for Acquire<'a, S> {
+    type Output = Permit<'a, S>;
 
     fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
         let mut this = self.project();
@@ -63,7 +63,7 @@ impl<'a, State: SemaphoreState> Future for Acquire<'a, State> {
 
             // if we are the leader, try and acquire a permit.
             if is_leader {
-                match state.inner.acquire(params) {
+                match state.state.acquire(params) {
                     Ok(permit) => return Poll::Ready(Permit::new(this.sem, permit)),
                     Err(p) => params = p,
                 }
