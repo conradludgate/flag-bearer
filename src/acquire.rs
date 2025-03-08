@@ -1,11 +1,13 @@
-use std::{
+use core::{
     pin::{Pin, pin},
     task::{Context, Poll},
 };
 
+use alloc::sync::Arc;
+
 use pin_list::{Node, NodeData};
 
-use crate::{Permit, PinQueue, Semaphore, SemaphoreState};
+use crate::{Permit, PermitOwned, PinQueue, Semaphore, SemaphoreState};
 
 pub enum TryAcquireError<S: SemaphoreState> {
     NoPermits(S::Params),
@@ -38,6 +40,19 @@ impl<S: SemaphoreState> Semaphore<S> {
         }
 
         Err(TryAcquireError::NoPermits(params))
+    }
+
+    pub async fn acquire_owned(self: Arc<Self>, params: S::Params) -> PermitOwned<S> {
+        let permit = self.acquire(params).await.take();
+        PermitOwned::out_of_thin_air(self, permit)
+    }
+
+    pub fn try_acquire_owned(
+        self: Arc<Self>,
+        params: S::Params,
+    ) -> Result<PermitOwned<S>, TryAcquireError<S>> {
+        let permit = self.try_acquire(params)?.take();
+        Ok(PermitOwned::out_of_thin_air(self, permit))
     }
 }
 pin_project_lite::pin_project! {

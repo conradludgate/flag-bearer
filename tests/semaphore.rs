@@ -84,18 +84,17 @@ mod semaphore {
             )))
         }
 
-        pub fn merge(&mut self, mut other: Self) {
+        pub fn merge(&mut self, other: Self) {
             let a = self.0.semaphore() as *const _;
             let b = other.0.semaphore() as *const _;
 
             assert_eq!(a, b, "semaphores of each permit should match");
 
-            let n = core::mem::replace(other.0.permit_mut(), 0);
-            *self.0.permit_mut() += n;
+            *self.0.permit_mut() += other.0.take();
         }
 
-        pub fn forget(mut self) {
-            *self.0.permit_mut() = 0;
+        pub fn forget(self) {
+            self.0.take();
         }
     }
 }
