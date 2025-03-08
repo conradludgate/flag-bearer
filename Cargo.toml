@@ -4,7 +4,6 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
-tokio = { version = "1", features = ["sync"] }
 pin-project-lite = "0.2"
 parking_lot = "0.12"
 pin-list = "0.1"

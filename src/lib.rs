@@ -5,7 +5,7 @@ use pin_list::PinList;
 
 mod acquire;
 
-pub struct Semaphore<State> {
+pub struct Semaphore<State: SemaphoreState> {
     state: Mutex<StateWrapper<State>>,
     fifo: bool,
 }
@@ -25,23 +25,48 @@ impl<State: SemaphoreState + std::fmt::Debug> std::fmt::Debug for Semaphore<Stat
     }
 }
 
-struct StateWrapper<State> {
+struct StateWrapper<State: SemaphoreState> {
     inner: State,
-    queue: PinList<PinQueue>,
+    queue: PinList<PinQueue<State>>,
 }
 
-type PinQueue = dyn pin_list::Types<
+impl<S: SemaphoreState> StateWrapper<S> {
+    fn check(&mut self, fifo: bool) {
+        let mut leader = if fifo {
+            self.queue.cursor_front_mut()
+        } else {
+            self.queue.cursor_back_mut()
+        };
+
+        let Some(p) = leader.protected_mut() else {
+            return;
+        };
+
+        let params =
+            p.0.take()
+                .expect("params should be in place. possibly the acquire method panicked");
+        match self.inner.acquire(params) {
+            Ok(permit) => match leader.remove_current(permit) {
+                Ok((_, waker)) => waker.wake(),
+                Err(_) => unreachable!("we have just made sure it is in the list"),
+            },
+            Err(params) => {
+                p.0 = Some(params);
+            }
+        }
+    }
+}
+
+type PinQueue<S> = dyn pin_list::Types<
         Id = pin_list::id::DebugChecked,
-        Protected = Waker,
-        Removed = (),
+        Protected = (Option<<S as SemaphoreState>::Params>, Waker),
+        Removed = <S as SemaphoreState>::Permit,
         Unprotected = (),
     >;
 
 pub trait SemaphoreState {
     type Params;
     type Permit;
-
-    fn permits_available(&self) -> bool;
 
     /// Acquire a permit given the params.
     fn acquire(&mut self, params: Self::Params) -> Result<Self::Permit, Self::Params>;
@@ -74,9 +99,7 @@ impl<State: SemaphoreState> Semaphore<State> {
     pub fn with_state<R>(&self, f: impl FnOnce(&mut State) -> R) -> R {
         let mut state = self.state.lock();
         let res = f(&mut state.inner);
-        if state.inner.permits_available() {
-            // self.queue.notify(&mut state);
-        }
+        state.check(self.fifo);
         res
     }
 }
@@ -103,14 +126,8 @@ impl<'a, State: SemaphoreState> Permit<'a, State> {
 
 impl<State: SemaphoreState> Drop for Permit<'_, State> {
     fn drop(&mut self) {
-        let mut state = self.sem.state.lock();
         // Safety: only taken on drop.
-        state
-            .inner
-            .release(unsafe { ManuallyDrop::take(&mut self.permit) });
-
-        if state.inner.permits_available() {
-            // self.sem.queue.notify(&mut state)
-        }
+        let permit = unsafe { ManuallyDrop::take(&mut self.permit) };
+        self.sem.with_state(|s| s.release(permit));
     }
 }

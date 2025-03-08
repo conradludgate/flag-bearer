@@ -3,7 +3,7 @@ use std::{
     task::{Context, Poll},
 };
 
-use pin_list::{Cursor, Node};
+use pin_list::{Node, NodeData};
 
 use crate::{Permit, PinQueue, Semaphore, SemaphoreState};
 
@@ -21,16 +21,26 @@ pin_project_lite::pin_project! {
     struct Acquire<'a, State: SemaphoreState> {
         sem: &'a Semaphore<State>,
         #[pin]
-        node: Node<PinQueue>,
+        node: Node<PinQueue<State>>,
         params: Option<State::Params>,
     }
 
     impl<'a, State: SemaphoreState> PinnedDrop for Acquire<'a, State> {
         fn drop(this: Pin<&mut Self>) {
             let this = this.project();
-            if let Some(node) = this.node.initialized_mut() {
-                node.reset(&mut this.sem.state.lock().queue);
+            let Some(node) = this.node.initialized_mut() else { return;};
+
+            let mut state = this.sem.state.lock();
+            let (data, _unprotected) = node.reset(&mut state.queue);
+
+            // we were woken, but dropped at the same time. release the permit
+            if let NodeData::Removed(permit) = data {
+                state.inner.release(permit);
             }
+
+            // if we were the leader, we might have stopped some other task
+            // from progressing. check if a new task is ready.
+            state.check(this.sem.fifo);
         }
     }
 }
@@ -42,54 +52,40 @@ impl<'a, State: SemaphoreState> Future for Acquire<'a, State> {
         let mut this = self.project();
         let mut state = this.sem.state.lock();
 
-        let init = if let Some(init) = this.node.as_mut().initialized_mut() {
-            init
-        } else {
-            state
-                .queue
-                .push_back(this.node.as_mut(), cx.waker().clone(), ())
+        let Some(init) = this.node.as_mut().initialized_mut() else {
+            // first time polling.
+            let mut params = this.params.take().unwrap();
+            let node = this.node.as_mut();
+
+            // if last-in-first-out, we are the last in and thus the leader.
+            // if first-in-first-out, we are only the leader if the queue is empty.
+            let is_leader = !this.sem.fifo || state.queue.is_empty();
+
+            // if we are the leader, try and acquire a permit.
+            if is_leader {
+                match state.inner.acquire(params) {
+                    Ok(permit) => return Poll::Ready(Permit::new(this.sem, permit)),
+                    Err(p) => params = p,
+                }
+            }
+
+            // no permit or we are not the leader, so we register into the queue.
+            let waker = cx.waker().clone();
+            state.queue.push_back(node, (Some(params), waker), ());
+            return Poll::Pending;
         };
 
-        let waker = init.protected_mut(&mut state.queue).unwrap();
-        waker.clone_from(cx.waker());
-
-        if !is_leader(init.cursor(&state.queue).unwrap(), this.sem.fifo) {
-            return Poll::Pending;
-        }
-
-        match state.inner.acquire(this.params.take().unwrap()) {
-            Err(p) => {
-                *this.params = Some(p);
+        match init.protected_mut(&mut state.queue) {
+            // spurious wakeup
+            Some((_, waker)) => {
+                waker.clone_from(cx.waker());
                 Poll::Pending
             }
-            Ok(permit) => {
-                _ = init
-                    .cursor_mut(&mut state.queue)
-                    .unwrap()
-                    .remove_current(())
-                    .unwrap();
-                if state.inner.permits_available() {
-                    let next = if this.sem.fifo {
-                        state.queue.cursor_front()
-                    } else {
-                        state.queue.cursor_back()
-                    };
-                    if let Some(waker) = next.protected() {
-                        waker.wake_by_ref();
-                    }
-                }
-
+            None => {
+                // Safety: we have just verified that it is removed;
+                let (permit, ()) = unsafe { init.take_removed_unchecked() };
                 Poll::Ready(Permit::new(this.sem, permit))
             }
         }
     }
-}
-
-fn is_leader(mut cursor: Cursor<'_, PinQueue>, fifo: bool) -> bool {
-    if fifo {
-        cursor.move_previous();
-    } else {
-        cursor.move_next();
-    }
-    cursor.unprotected().is_none()
 }

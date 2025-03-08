@@ -66,12 +66,8 @@ impl SemaphoreState for AimdState {
     type Params = ();
     type Permit = ();
 
-    fn permits_available(&self) -> bool {
-        self.acquired < self.state.limit
-    }
-
     fn acquire(&mut self, _: ()) -> Result<(), ()> {
-        if self.permits_available() {
+        if self.acquired < self.state.limit {
             self.acquired += 1;
             Ok(())
         } else {

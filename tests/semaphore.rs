@@ -12,10 +12,6 @@ impl SemaphoreState for SemaphoreCounter {
     /// Number of permits that have been acquired
     type Permit = usize;
 
-    fn permits_available(&self) -> bool {
-        self.0 > 0
-    }
-
     fn acquire(&mut self, params: Self::Params) -> Result<Self::Permit, Self::Params> {
         if params <= self.0 {
             self.0 -= params;
