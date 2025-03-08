@@ -4,6 +4,7 @@ use parking_lot::Mutex;
 use pin_list::PinList;
 
 mod acquire;
+pub use acquire::TryAcquireError;
 
 pub struct Semaphore<S: SemaphoreState> {
     state: Mutex<QueueState<S>>,
@@ -112,7 +113,8 @@ pub struct Permit<'a, S: SemaphoreState> {
 }
 
 impl<'a, S: SemaphoreState> Permit<'a, S> {
-    fn new(sem: &'a Semaphore<S>, permit: S::Permit) -> Self {
+    /// Construct a new permit out of thin air, no waiting is required.
+    pub fn out_of_thin_air(sem: &'a Semaphore<S>, permit: S::Permit) -> Self {
         Self {
             sem,
             permit: ManuallyDrop::new(permit),
@@ -121,6 +123,14 @@ impl<'a, S: SemaphoreState> Permit<'a, S> {
 
     pub fn permit(&self) -> &S::Permit {
         &self.permit
+    }
+
+    pub fn permit_mut(&mut self) -> &mut S::Permit {
+        &mut self.permit
+    }
+
+    pub fn semaphore(&self) -> &'a Semaphore<S> {
+        self.sem
     }
 }
 

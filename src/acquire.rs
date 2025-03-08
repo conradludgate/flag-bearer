@@ -7,6 +7,11 @@ use pin_list::{Node, NodeData};
 
 use crate::{Permit, PinQueue, Semaphore, SemaphoreState};
 
+pub enum TryAcquireError<S: SemaphoreState> {
+    NoPermits(S::Params),
+    Closed(S::Params),
+}
+
 impl<S: SemaphoreState> Semaphore<S> {
     pub async fn acquire(&self, params: S::Params) -> Permit<'_, S> {
         pin!(Acquire {
@@ -15,6 +20,24 @@ impl<S: SemaphoreState> Semaphore<S> {
             params: Some(params),
         })
         .await
+    }
+
+    pub fn try_acquire(&self, mut params: S::Params) -> Result<Permit<'_, S>, TryAcquireError<S>> {
+        let mut state = self.state.lock();
+
+        // if last-in-first-out, we are the last in and thus the leader.
+        // if first-in-first-out, we are only the leader if the queue is empty.
+        let is_leader = !self.fifo || state.queue.is_empty();
+
+        // if we are the leader, try and acquire a permit.
+        if is_leader {
+            match state.state.acquire(params) {
+                Ok(permit) => return Ok(Permit::out_of_thin_air(self, permit)),
+                Err(p) => params = p,
+            }
+        }
+
+        Err(TryAcquireError::NoPermits(params))
     }
 }
 pin_project_lite::pin_project! {
@@ -64,7 +87,7 @@ impl<'a, S: SemaphoreState> Future for Acquire<'a, S> {
             // if we are the leader, try and acquire a permit.
             if is_leader {
                 match state.state.acquire(params) {
-                    Ok(permit) => return Poll::Ready(Permit::new(this.sem, permit)),
+                    Ok(permit) => return Poll::Ready(Permit::out_of_thin_air(this.sem, permit)),
                     Err(p) => params = p,
                 }
             }
@@ -84,7 +107,7 @@ impl<'a, S: SemaphoreState> Future for Acquire<'a, S> {
             None => {
                 // Safety: we have just verified that it is removed;
                 let (permit, ()) = unsafe { init.take_removed_unchecked() };
-                Poll::Ready(Permit::new(this.sem, permit))
+                Poll::Ready(Permit::out_of_thin_air(this.sem, permit))
             }
         }
     }
