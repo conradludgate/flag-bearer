@@ -38,7 +38,7 @@ mod semaphore {
         pub const MAX_PERMITS: usize = usize::MAX;
 
         pub fn new(count: usize) -> Self {
-            Self(flag_bearer::Semaphore::new_fifo(SemaphoreCounter(count)))
+            Self(flag_bearer::Semaphore::new_lifo(SemaphoreCounter(count)))
         }
 
         pub async fn acquire(&self) -> Permit<'_> {
@@ -266,11 +266,11 @@ fn no_panic_at_maxpermits() {
 }
 
 #[tokio::test]
-async fn fifo_order() {
+async fn lifo_order() {
     let s = Semaphore::new(0);
-    let mut a1 = pin!(s.acquire_many(3));
+    let mut a1 = pin!(s.acquire_many(1));
     let mut a2 = pin!(s.acquire_many(2));
-    let mut a3 = pin!(s.acquire_many(1));
+    let mut a3 = pin!(s.acquire_many(3));
 
     let mut cx = Context::from_waker(noop_waker_ref());
     assert!(a1.as_mut().poll(&mut cx).is_pending());
@@ -288,15 +288,15 @@ async fn fifo_order() {
     assert!(a3.as_mut().poll(&mut cx).is_pending());
 
     s.add_permits(1);
+    assert!(a1.as_mut().poll(&mut cx).is_pending());
     assert!(a2.as_mut().poll(&mut cx).is_pending());
-    assert!(a3.as_mut().poll(&mut cx).is_pending());
-    let p1 = a1.await;
+    let p3 = a3.await;
 
+    assert!(a1.as_mut().poll(&mut cx).is_pending());
     assert!(a2.as_mut().poll(&mut cx).is_pending());
-    assert!(a3.as_mut().poll(&mut cx).is_pending());
 
-    drop(p1);
-    let _p3 = a3.await;
+    drop(p3);
+    let _p1 = a1.await;
     let _p2 = a2.await;
 }
 

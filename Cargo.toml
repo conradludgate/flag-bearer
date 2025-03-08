@@ -10,3 +10,5 @@ pin-list = "0.1"
 
 [dev-dependencies]
 tokio = { version = "1", features = ["full"] }
+futures-testing = { git = "https://github.com/conradludgate/futures-testing" }
+futures-util = "0.3"

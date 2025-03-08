@@ -118,16 +118,3 @@ async fn check() {
     drop(permit1);
     assert_eq!(sem.with_state(|s| s.available()), 1);
 }
-
-// #[tokio::test]
-// async fn fair() {
-//     use std::sync::Arc;
-//     let sem = Arc::new(tokio::sync::Semaphore::new(1));
-//     let sem2 = sem.clone();
-//     tokio::spawn(async move {
-//         sem2.acquire_many(2).await.unwrap();
-//     });
-
-//     tokio::time::sleep(Duration::from_secs(1)).await;
-//     sem.try_acquire_many(1).unwrap();
-// }

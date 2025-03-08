@@ -38,26 +38,29 @@ struct QueueState<S: SemaphoreState> {
 
 impl<S: SemaphoreState> QueueState<S> {
     fn check(&mut self, fifo: bool) {
-        let mut leader = if fifo {
-            self.queue.cursor_front_mut()
-        } else {
-            self.queue.cursor_back_mut()
-        };
+        loop {
+            let mut leader = if fifo {
+                self.queue.cursor_front_mut()
+            } else {
+                self.queue.cursor_back_mut()
+            };
 
-        let Some(p) = leader.protected_mut() else {
-            return;
-        };
+            let Some(p) = leader.protected_mut() else {
+                break;
+            };
 
-        let params =
-            p.0.take()
-                .expect("params should be in place. possibly the acquire method panicked");
-        match self.state.acquire(params) {
-            Ok(permit) => match leader.remove_current(permit) {
-                Ok((_, waker)) => waker.wake(),
-                Err(_) => unreachable!("we have just made sure it is in the list"),
-            },
-            Err(params) => {
-                p.0 = Some(params);
+            let params =
+                p.0.take()
+                    .expect("params should be in place. possibly the acquire method panicked");
+            match self.state.acquire(params) {
+                Ok(permit) => match leader.remove_current(permit) {
+                    Ok((_, waker)) => waker.wake(),
+                    Err(_) => unreachable!("we have just made sure it is in the list"),
+                },
+                Err(params) => {
+                    p.0 = Some(params);
+                    break;
+                }
             }
         }
     }

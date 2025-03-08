@@ -7,7 +7,7 @@ use alloc::sync::Arc;
 
 use pin_list::{Node, NodeData};
 
-use crate::{Permit, PermitOwned, PinQueue, Semaphore, SemaphoreState};
+use crate::{Permit, PermitOwned, PinQueue, QueueState, Semaphore, SemaphoreState};
 
 pub enum TryAcquireError<S: SemaphoreState> {
     NoPermits(S::Params),
@@ -15,35 +15,48 @@ pub enum TryAcquireError<S: SemaphoreState> {
 }
 
 impl<S: SemaphoreState> Semaphore<S> {
-    pub async fn acquire(&self, params: S::Params) -> Permit<'_, S> {
-        pin!(Acquire {
+    #[inline]
+    fn acquire_inner(&self, params: S::Params) -> impl Future<Output = S::Permit> {
+        Acquire {
             sem: self,
             node: Node::new(),
             params: Some(params),
-        })
-        .await
+        }
     }
 
-    pub fn try_acquire(&self, mut params: S::Params) -> Result<Permit<'_, S>, TryAcquireError<S>> {
+    #[inline]
+    fn try_acquire_inner(
+        &self,
+        params: S::Params,
+        unfair: bool,
+    ) -> Result<S::Permit, TryAcquireError<S>> {
         let mut state = self.state.lock();
-
-        // if last-in-first-out, we are the last in and thus the leader.
-        // if first-in-first-out, we are only the leader if the queue is empty.
-        let is_leader = !self.fifo || state.queue.is_empty();
-
-        // if we are the leader, try and acquire a permit.
-        if is_leader {
-            match state.state.acquire(params) {
-                Ok(permit) => return Ok(Permit::out_of_thin_air(self, permit)),
-                Err(p) => params = p,
-            }
+        match state.unlinked_try_acquire(params, self.fifo, unfair) {
+            Ok(permit) => Ok(permit),
+            Err(params) => Err(TryAcquireError::NoPermits(params)),
         }
+    }
 
-        Err(TryAcquireError::NoPermits(params))
+    pub async fn acquire(&self, params: S::Params) -> Permit<'_, S> {
+        let permit = self.acquire_inner(params).await;
+        Permit::out_of_thin_air(self, permit)
+    }
+
+    pub fn try_acquire(&self, params: S::Params) -> Result<Permit<'_, S>, TryAcquireError<S>> {
+        let permit = self.try_acquire_inner(params, false)?;
+        Ok(Permit::out_of_thin_air(self, permit))
+    }
+
+    pub fn try_acquire_unfair(
+        &self,
+        params: S::Params,
+    ) -> Result<Permit<'_, S>, TryAcquireError<S>> {
+        let permit = self.try_acquire_inner(params, true)?;
+        Ok(Permit::out_of_thin_air(self, permit))
     }
 
     pub async fn acquire_owned(self: Arc<Self>, params: S::Params) -> PermitOwned<S> {
-        let permit = self.acquire(params).await.take();
+        let permit = self.acquire_inner(params).await;
         PermitOwned::out_of_thin_air(self, permit)
     }
 
@@ -51,10 +64,19 @@ impl<S: SemaphoreState> Semaphore<S> {
         self: Arc<Self>,
         params: S::Params,
     ) -> Result<PermitOwned<S>, TryAcquireError<S>> {
-        let permit = self.try_acquire(params)?.take();
+        let permit = self.try_acquire_inner(params, false)?;
+        Ok(PermitOwned::out_of_thin_air(self, permit))
+    }
+
+    pub fn try_acquire_unfair_owned(
+        self: Arc<Self>,
+        params: S::Params,
+    ) -> Result<PermitOwned<S>, TryAcquireError<S>> {
+        let permit = self.try_acquire_inner(params, true)?;
         Ok(PermitOwned::out_of_thin_air(self, permit))
     }
 }
+
 pin_project_lite::pin_project! {
     struct Acquire<'a, S: SemaphoreState> {
         sem: &'a Semaphore<S>,
@@ -83,8 +105,8 @@ pin_project_lite::pin_project! {
     }
 }
 
-impl<'a, S: SemaphoreState> Future for Acquire<'a, S> {
-    type Output = Permit<'a, S>;
+impl<S: SemaphoreState> Future for Acquire<'_, S> {
+    type Output = S::Permit;
 
     fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
         let mut this = self.project();
@@ -92,25 +114,18 @@ impl<'a, S: SemaphoreState> Future for Acquire<'a, S> {
 
         let Some(init) = this.node.as_mut().initialized_mut() else {
             // first time polling.
-            let mut params = this.params.take().unwrap();
+            let params = this.params.take().unwrap();
             let node = this.node.as_mut();
 
-            // if last-in-first-out, we are the last in and thus the leader.
-            // if first-in-first-out, we are only the leader if the queue is empty.
-            let is_leader = !this.sem.fifo || state.queue.is_empty();
-
-            // if we are the leader, try and acquire a permit.
-            if is_leader {
-                match state.state.acquire(params) {
-                    Ok(permit) => return Poll::Ready(Permit::out_of_thin_air(this.sem, permit)),
-                    Err(p) => params = p,
+            match state.unlinked_try_acquire(params, this.sem.fifo, false) {
+                Ok(permit) => return Poll::Ready(permit),
+                Err(params) => {
+                    // no permit or we are not the leader, so we register into the queue.
+                    let waker = cx.waker().clone();
+                    state.queue.push_back(node, (Some(params), waker), ());
+                    return Poll::Pending;
                 }
             }
-
-            // no permit or we are not the leader, so we register into the queue.
-            let waker = cx.waker().clone();
-            state.queue.push_back(node, (Some(params), waker), ());
-            return Poll::Pending;
         };
 
         match init.protected_mut(&mut state.queue) {
@@ -122,8 +137,32 @@ impl<'a, S: SemaphoreState> Future for Acquire<'a, S> {
             None => {
                 // Safety: we have just verified that it is removed;
                 let (permit, ()) = unsafe { init.take_removed_unchecked() };
-                Poll::Ready(Permit::out_of_thin_air(this.sem, permit))
+                Poll::Ready(permit)
             }
+        }
+    }
+}
+
+impl<S: SemaphoreState> QueueState<S> {
+    #[inline]
+    fn unlinked_try_acquire(
+        &mut self,
+        params: S::Params,
+        fifo: bool,
+        unfair: bool,
+    ) -> Result<S::Permit, S::Params> {
+        // if last-in-first-out, we are the last in and thus the leader.
+        // if first-in-first-out, we are only the leader if the queue is empty.
+        let is_leader = unfair || !fifo || self.queue.is_empty();
+
+        // if we are the leader, try and acquire a permit.
+        if is_leader {
+            match self.state.acquire(params) {
+                Ok(permit) => Ok(permit),
+                Err(p) => Err(p),
+            }
+        } else {
+            Err(params)
         }
     }
 }
