@@ -60,6 +60,8 @@ checksum = "baf1de4339761588bc0619e3cbc0120ee582ebb74b53b4efbf79117bd2da40fd"
 name = "flag-bearer"
 version = "0.1.0"
 dependencies = [
+ "parking_lot",
+ "pin-list",
  "pin-project-lite",
  "tokio",
 ]
@@ -145,10 +147,26 @@ dependencies = [
 ]
 
 [[package]]
+name = "pin-list"
+version = "0.1.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "e27925b9fcf5bfeb3e290df877491f67f7ace2b92bc09fac28ecf474e37fc6b9"
+dependencies = [
+ "pin-project-lite",
+ "pinned-aliasable",
+]
+
+[[package]]
 name = "pin-project-lite"
 version = "0.2.16"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "3b3cff922bd51709b605d9ead9aa71031d81447142d828eb4a6eba76fe619f9b"
+
+[[package]]
+name = "pinned-aliasable"
+version = "0.1.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "5d0f9ae89bf0ed03b69ac1f3f7ea2e6e09b4fa5448011df2e67d581c2b850b7b"
 
 [[package]]
 name = "proc-macro2"
