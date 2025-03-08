@@ -11,6 +11,8 @@ You want to limit number of active HTTP requests, as well as total buffer alloca
 You could define the semaphore state like so.
 
 ```
+use flag_bearer::{Semaphore, SemaphoreState};
+
 #[derive(Debug)]
 pub struct SemaphoreCounter {
     bytes: u64,
@@ -24,10 +26,6 @@ pub struct Request {
 impl SemaphoreState for SemaphoreCounter {
     type Params = Request;
     type Permit = Request;
-
-    fn permits_available(&self) -> bool {
-        self.requests > 0 && self.bytes > 0
-    }
 
     fn acquire(&mut self, params: Self::Params) -> Result<Self::Permit, Self::Params> {
         if self.bytes >= params.bytes && self.requests > 0 {
@@ -45,4 +43,9 @@ impl SemaphoreState for SemaphoreCounter {
         self.requests += 1;
     }
 }
+
+let semaphore = Semaphore::new(SemaphoreCounter {
+    bytes: 10 * 1024 * 1024, // 10 MiB.
+    requests: 10, // 10 requests.
+})
 ```
