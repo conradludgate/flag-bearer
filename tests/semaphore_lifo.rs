@@ -1,4 +1,8 @@
-use std::{pin::pin, sync::Arc, task::Context};
+use std::{
+    pin::pin,
+    sync::Arc,
+    task::{Context, Poll},
+};
 
 mod semaphore {
     #[derive(Debug)]
@@ -265,8 +269,8 @@ fn no_panic_at_maxpermits() {
     s.add_permits(1);
 }
 
-#[tokio::test]
-async fn lifo_order() {
+#[test]
+fn lifo_order() {
     let s = Semaphore::new(0);
     let mut a1 = pin!(s.acquire_many(1));
     let mut a2 = pin!(s.acquire_many(2));
@@ -290,14 +294,20 @@ async fn lifo_order() {
     s.add_permits(1);
     assert!(a1.as_mut().poll(&mut cx).is_pending());
     assert!(a2.as_mut().poll(&mut cx).is_pending());
-    let p3 = a3.await;
+    let Poll::Ready(p3) = a3.poll(&mut cx) else {
+        panic!()
+    };
 
     assert!(a1.as_mut().poll(&mut cx).is_pending());
     assert!(a2.as_mut().poll(&mut cx).is_pending());
 
     drop(p3);
-    let _p1 = a1.await;
-    let _p2 = a2.await;
+    let Poll::Ready(_p1) = a1.poll(&mut cx) else {
+        panic!()
+    };
+    let Poll::Ready(_p2) = a2.poll(&mut cx) else {
+        panic!()
+    };
 }
 
 struct SemaphoreTestCase;

@@ -1,5 +1,5 @@
 use core::{
-    pin::{Pin, pin},
+    pin::Pin,
     task::{Context, Poll},
 };
 
@@ -37,16 +37,42 @@ impl<S: SemaphoreState> Semaphore<S> {
         }
     }
 
+    /// Acquire a new permit fairly with the given parameters.
+    ///
+    /// If a permit is not immediately available, this task will
+    /// join a queue.
     pub async fn acquire(&self, params: S::Params) -> Permit<'_, S> {
         let permit = self.acquire_inner(params).await;
         Permit::out_of_thin_air(self, permit)
     }
 
+    /// Acquire a new permit fairly with the given parameters.
+    ///
+    /// If this is a LIFO semaphore, and there are other tasks waiting for permits,
+    /// this will still try to acquire the permit - as this task would effectively
+    /// be the last in the queue.
+    ///
+    /// # Errors
+    ///
+    /// If there are currently not enough permits available for the given request,
+    /// then [`TryAcquireError::NoPermits`] is returned.
+    ///
+    /// If this is a FIFO semaphore, and there are other tasks waiting for permits,
+    /// then [`TryAcquireError::NoPermits`] is returned.
     pub fn try_acquire(&self, params: S::Params) -> Result<Permit<'_, S>, TryAcquireError<S>> {
         let permit = self.try_acquire_inner(params, false)?;
         Ok(Permit::out_of_thin_air(self, permit))
     }
 
+    /// Acquire a new permit, potentially unfairly, with the given parameters.
+    ///
+    /// If this is a FIFO semaphore, and there are other tasks waiting for permits,
+    /// this will still try to acquire the permit.
+    ///
+    /// # Errors
+    ///
+    /// If there are currently not enough permits available for the given request,
+    /// then [`TryAcquireError::NoPermits`] is returned.
     pub fn try_acquire_unfair(
         &self,
         params: S::Params,

@@ -1,6 +1,39 @@
+//! A crate for generic semaphore performing asynchronous permit acquisition.
+//!
+//! A semaphore maintains a set of permits. Permits are used to synchronize
+//! access to a shared resource. A semaphore differs from a mutex in that it
+//! can allow more than one concurrent caller to access the shared resource at a
+//! time.
+//!
+//! When `acquire` is called and the semaphore has remaining permits, the
+//! function immediately returns a permit. However, if no remaining permits are
+//! available, `acquire` (asynchronously) waits until an outstanding permit is
+//! dropped. At this point, the freed permit is assigned to the caller.
+//!
+//! This `Semaphore` is fair, and supports both FIFO and LIFO modes.
+//! * In FIFO mode, this fairness means that permits are given out in the order
+//!   they were requested.
+//! * In LIFO mode, this fairness means that permits are given out in the reverse
+//!   order they were requested.
+//!
+//! This fairness is also applied when `acquire` with high 'parameters' gets
+//! involved, so if a call to `acquire` at the end of the queue requests
+//! more permits than currently available, this can prevent another call to `acquire`
+//! from completing, even if the semaphore has enough permits to complete it.
+//!
+//! This semaphore is generic, which means you can customise the state.
+//! Examples:
+//! * Using two counters, you can immediately remove permits,
+//!   while there are some still in flight. This might be useful
+//!   if you want to remove concurrency if failures are detected.
+//! * There might be multiple quantities you want to limit over.
+//!   Stacking multiple semaphores can be awkward and risk deadlocks.
+//!   Instead, making the state contain all those quantities combined
+//!   can simplify the queueing.
+
 #![no_std]
 
-use core::{mem::ManuallyDrop, task::Waker};
+use core::{hint::unreachable_unchecked, mem::ManuallyDrop, task::Waker};
 
 extern crate alloc;
 use alloc::sync::Arc;
@@ -11,6 +44,38 @@ use pin_list::PinList;
 mod acquire;
 pub use acquire::TryAcquireError;
 
+/// Generic semaphore performing asynchronous permit acquisition.
+///
+/// A semaphore maintains a set of permits. Permits are used to synchronize
+/// access to a shared resource. A semaphore differs from a mutex in that it
+/// can allow more than one concurrent caller to access the shared resource at a
+/// time.
+///
+/// When `acquire` is called and the semaphore has remaining permits, the
+/// function immediately returns a permit. However, if no remaining permits are
+/// available, `acquire` (asynchronously) waits until an outstanding permit is
+/// dropped. At this point, the freed permit is assigned to the caller.
+///
+/// This `Semaphore` is fair, and supports both FIFO and LIFO modes.
+/// * In FIFO mode, this fairness means that permits are given out in the order
+///   they were requested.
+/// * In LIFO mode, this fairness means that permits are given out in the reverse
+///   order they were requested.
+///
+/// This fairness is also applied when `acquire` with high 'parameters' gets
+/// involved, so if a call to `acquire` at the end of the queue requests
+/// more permits than currently available, this can prevent another call to `acquire`
+/// from completing, even if the semaphore has enough permits to complete it.
+///
+/// This semaphore is generic, which means you can customise the state.
+/// Examples:
+/// * Using two counters, you can immediately remove permits,
+///   while there are some still in flight. This might be useful
+///   if you want to remove concurrency if failures are detected.
+/// * There might be multiple quantities you want to limit over.
+///   Stacking multiple semaphores can be awkward and risk deadlocks.
+///   Instead, making the state contain all those quantities combined
+///   can simplify the queueing.
 pub struct Semaphore<S: SemaphoreState> {
     state: Mutex<QueueState<S>>,
     fifo: bool,
@@ -37,6 +102,7 @@ struct QueueState<S: SemaphoreState> {
 }
 
 impl<S: SemaphoreState> QueueState<S> {
+    #[inline]
     fn check(&mut self, fifo: bool) {
         loop {
             let mut leader = if fifo {
@@ -55,7 +121,8 @@ impl<S: SemaphoreState> QueueState<S> {
             match self.state.acquire(params) {
                 Ok(permit) => match leader.remove_current(permit) {
                     Ok((_, waker)) => waker.wake(),
-                    Err(_) => unreachable!("we have just made sure it is in the list"),
+                    // Safety: with protected_mut, we have just made sure it is in the list
+                    Err(_) => unsafe { unreachable_unchecked() },
                 },
                 Err(params) => {
                     p.0 = Some(params);
@@ -84,10 +151,12 @@ pub trait SemaphoreState {
 }
 
 impl<S: SemaphoreState> Semaphore<S> {
+    /// Create a new first-in-first-out semaphore with the given initial state.
     pub fn new_fifo(state: S) -> Self {
         Self::new_inner(state, true)
     }
 
+    /// Create a new last-in-first-out semaphore with the given initial state.
     pub fn new_lifo(state: S) -> Self {
         Self::new_inner(state, false)
     }
@@ -103,8 +172,12 @@ impl<S: SemaphoreState> Semaphore<S> {
         }
     }
 
+    /// Access the state with mutable access.
+    ///
     /// This gives direct access to the state, be careful not to
-    /// break any of your own state invariants.
+    /// break any of your own state invariants. You can use this
+    /// to peek at the current state, or to modify it, eg to add or
+    /// remove permits from the semaphore.
     pub fn with_state<R>(&self, f: impl FnOnce(&mut S) -> R) -> R {
         let mut state = self.state.lock();
         let res = f(&mut state.state);
