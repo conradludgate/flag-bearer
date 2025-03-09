@@ -3,11 +3,9 @@ use core::{
     task::{Context, Poll},
 };
 
-use alloc::sync::Arc;
-
 use pin_list::{Node, NodeData};
 
-use crate::{Permit, PermitOwned, PinQueue, QueueState, Semaphore, SemaphoreState};
+use crate::{Permit, PinQueue, QueueState, Semaphore, SemaphoreState};
 
 pub enum TryAcquireError<S: SemaphoreState> {
     NoPermits(S::Params),
@@ -79,27 +77,6 @@ impl<S: SemaphoreState> Semaphore<S> {
     ) -> Result<Permit<'_, S>, TryAcquireError<S>> {
         let permit = self.try_acquire_inner(params, true)?;
         Ok(Permit::out_of_thin_air(self, permit))
-    }
-
-    pub async fn acquire_owned(self: Arc<Self>, params: S::Params) -> PermitOwned<S> {
-        let permit = self.acquire_inner(params).await;
-        PermitOwned::out_of_thin_air(self, permit)
-    }
-
-    pub fn try_acquire_owned(
-        self: Arc<Self>,
-        params: S::Params,
-    ) -> Result<PermitOwned<S>, TryAcquireError<S>> {
-        let permit = self.try_acquire_inner(params, false)?;
-        Ok(PermitOwned::out_of_thin_air(self, permit))
-    }
-
-    pub fn try_acquire_unfair_owned(
-        self: Arc<Self>,
-        params: S::Params,
-    ) -> Result<PermitOwned<S>, TryAcquireError<S>> {
-        let permit = self.try_acquire_inner(params, true)?;
-        Ok(PermitOwned::out_of_thin_air(self, permit))
     }
 }
 

@@ -65,6 +65,14 @@ mod semaphore {
             }
         }
 
+        pub fn try_acquire_many_unfair(&self, n: usize) -> Result<Permit<'_>, TryAcquireError> {
+            match self.0.try_acquire_unfair(n) {
+                Ok(permit) => Ok(Permit(permit)),
+                Err(flag_bearer::TryAcquireError::NoPermits(_)) => Err(TryAcquireError::NoPermits),
+                Err(flag_bearer::TryAcquireError::Closed(_)) => Err(TryAcquireError::Closed),
+            }
+        }
+
         pub fn add_permits(&self, n: usize) {
             self.0.with_state(|s| s.0 = s.0.checked_add(n).unwrap());
         }
@@ -308,6 +316,18 @@ fn fifo_order() {
     let Poll::Ready(_p2) = a2.poll(&mut cx) else {
         panic!()
     };
+}
+
+#[test]
+fn fifo_unfair() {
+    let s = Semaphore::new(1);
+    let mut a1 = pin!(s.acquire_many(3));
+
+    let mut cx = Context::from_waker(noop_waker_ref());
+    assert!(a1.as_mut().poll(&mut cx).is_pending());
+
+    assert!(s.try_acquire_many(1).is_err());
+    assert!(s.try_acquire_many_unfair(1).is_ok());
 }
 
 struct SemaphoreTestCase;

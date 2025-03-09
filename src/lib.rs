@@ -35,8 +35,8 @@
 
 use core::{hint::unreachable_unchecked, mem::ManuallyDrop, task::Waker};
 
-extern crate alloc;
-use alloc::sync::Arc;
+#[cfg(test)]
+extern crate std;
 
 use parking_lot::Mutex;
 use pin_list::PinList;
@@ -84,6 +84,7 @@ pub struct Semaphore<S: SemaphoreState> {
 impl<S: SemaphoreState + core::fmt::Debug> core::fmt::Debug for Semaphore<S> {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         let mut d = f.debug_struct("Semaphore");
+        d.field("fifo", &self.fifo);
         match self.state.try_lock() {
             Some(guard) => {
                 d.field("state", &guard.state);
@@ -246,45 +247,26 @@ impl<S: SemaphoreState> Drop for Permit<'_, S> {
     }
 }
 
-#[derive(Debug)]
-pub struct PermitOwned<S: SemaphoreState> {
-    sem: Arc<Semaphore<S>>,
-    // this is never dropped because it's returned to the semaphore on drop
-    permit: ManuallyDrop<S::Permit>,
-}
+#[cfg(test)]
+mod test {
+    #[derive(Debug)]
+    struct Dummy;
 
-impl<S: SemaphoreState> PermitOwned<S> {
-    /// Construct a new permit out of thin air, no waiting is required.
-    pub fn out_of_thin_air(sem: Arc<Semaphore<S>>, permit: S::Permit) -> Self {
-        Self {
-            sem,
-            permit: ManuallyDrop::new(permit),
+    impl crate::SemaphoreState for Dummy {
+        type Params = ();
+        type Permit = ();
+
+        fn acquire(&mut self, _params: Self::Params) -> Result<Self::Permit, Self::Params> {
+            Ok(())
         }
+
+        fn release(&mut self, _permit: Self::Permit) {}
     }
 
-    pub fn permit(&self) -> &S::Permit {
-        &self.permit
-    }
-
-    pub fn permit_mut(&mut self) -> &mut S::Permit {
-        &mut self.permit
-    }
-
-    pub fn semaphore(&self) -> &Semaphore<S> {
-        &self.sem
-    }
-
-    pub fn take(self) -> S::Permit {
-        let mut this = ManuallyDrop::new(self);
-        unsafe { Arc::decrement_strong_count(Arc::as_ptr(&this.sem)) };
-        unsafe { ManuallyDrop::take(&mut this.permit) }
-    }
-}
-
-impl<S: SemaphoreState> Drop for PermitOwned<S> {
-    fn drop(&mut self) {
-        // Safety: only taken on drop.
-        let permit = unsafe { ManuallyDrop::take(&mut self.permit) };
-        self.sem.with_state(|s| s.release(permit));
+    #[test]
+    fn debug() {
+        let s = crate::Semaphore::new_fifo(Dummy);
+        let s = std::format!("{s:?}");
+        assert_eq!(s, "Semaphore { fifo: true, state: Dummy, .. }");
     }
 }
