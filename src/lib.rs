@@ -120,7 +120,7 @@ impl<S: SemaphoreState> QueueState<S> {
                 p.0.take()
                     .expect("params should be in place. possibly the acquire method panicked");
             match self.state.acquire(params) {
-                Ok(permit) => match leader.remove_current(permit) {
+                Ok(permit) => match leader.remove_current(Ok(permit)) {
                     Ok((_, waker)) => waker.wake(),
                     // Safety: with protected_mut, we have just made sure it is in the list
                     Err(_) => unsafe { unreachable_unchecked() },
@@ -136,8 +136,12 @@ impl<S: SemaphoreState> QueueState<S> {
 
 type PinQueue<S> = dyn pin_list::Types<
         Id = pin_list::id::DebugChecked,
+        // Some(params), waker -> Pending
+        // None, waker -> Invalid state.
         Protected = (Option<<S as SemaphoreState>::Params>, Waker),
-        Removed = <S as SemaphoreState>::Permit,
+        // Ok(permit) -> Ready
+        // Err(params) -> Closed
+        Removed = Result<<S as SemaphoreState>::Permit, <S as SemaphoreState>::Params>,
         Unprotected = (),
     >;
 

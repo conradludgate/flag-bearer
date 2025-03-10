@@ -45,12 +45,12 @@ mod semaphore {
             Self(flag_bearer::Semaphore::new_fifo(SemaphoreCounter(count)))
         }
 
-        pub async fn acquire(&self) -> Permit<'_> {
-            Permit(self.0.acquire(1).await)
+        pub async fn acquire(&self) -> Option<Permit<'_>> {
+            Some(Permit(self.0.acquire(1).await.ok()?))
         }
 
-        pub async fn acquire_many(&self, n: usize) -> Permit<'_> {
-            Permit(self.0.acquire(n).await)
+        pub async fn acquire_many(&self, n: usize) -> Option<Permit<'_>> {
+            Some(Permit(self.0.acquire(n).await.ok()?))
         }
 
         pub fn try_acquire(&self) -> Result<Permit<'_>, TryAcquireError> {
@@ -140,7 +140,7 @@ async fn acquire() {
     let p1 = sem.try_acquire().unwrap();
     let sem_clone = sem.clone();
     let j = tokio::spawn(async move {
-        let _p2 = sem_clone.acquire().await;
+        let _p2 = sem_clone.acquire().await.unwrap();
     });
     drop(p1);
     j.await.unwrap();
@@ -151,7 +151,7 @@ async fn add_permits() {
     let sem = Arc::new(Semaphore::new(0));
     let sem_clone = sem.clone();
     let j = tokio::spawn(async move {
-        let _p2 = sem_clone.acquire().await;
+        let _p2 = sem_clone.acquire().await.unwrap();
     });
     sem.add_permits(1);
     j.await.unwrap();
@@ -227,7 +227,7 @@ async fn stress_test() {
     for _ in 0..1000 {
         let sem_clone = sem.clone();
         join_handles.push(tokio::spawn(async move {
-            let _p = sem_clone.acquire().await;
+            let _p = sem_clone.acquire().await.unwrap();
         }));
     }
     for j in join_handles {
@@ -302,7 +302,7 @@ fn fifo_order() {
     s.add_permits(1);
     assert!(a2.as_mut().poll(&mut cx).is_pending());
     assert!(a3.as_mut().poll(&mut cx).is_pending());
-    let Poll::Ready(p1) = a1.poll(&mut cx) else {
+    let Poll::Ready(Some(p1)) = a1.poll(&mut cx) else {
         panic!()
     };
 
@@ -310,10 +310,10 @@ fn fifo_order() {
     assert!(a3.as_mut().poll(&mut cx).is_pending());
 
     drop(p1);
-    let Poll::Ready(_p3) = a3.poll(&mut cx) else {
+    let Poll::Ready(Some(_p3)) = a3.poll(&mut cx) else {
         panic!()
     };
-    let Poll::Ready(_p2) = a2.poll(&mut cx) else {
+    let Poll::Ready(Some(_p2)) = a2.poll(&mut cx) else {
         panic!()
     };
 }
@@ -349,7 +349,7 @@ impl<'b> TestCase<'b> for SemaphoreTestCase {
 
         let n = *args;
         let future = async move {
-            semaphore.acquire_many(n).await;
+            semaphore.acquire_many(n).await.unwrap();
         };
 
         (driver, future)
