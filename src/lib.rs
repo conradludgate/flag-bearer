@@ -44,6 +44,34 @@ use pin_list::PinList;
 mod acquire;
 pub use acquire::TryAcquireError;
 
+/// The trait defining how [`Semaphore`]s behave.
+pub trait SemaphoreState {
+    /// What type is used to request permits.
+    ///
+    /// An example of this could be `usize` for a counting semaphore,
+    /// if you want to support `acquire_many` type requests.
+    type Params;
+
+    /// The type representing the current permit allocation.
+    ///
+    /// If you have a counting semaphore, this could be the number
+    /// of permits acquired. If this is more like a connection pool,
+    /// this could be a specific object allocation.
+    type Permit;
+
+    /// Acquire a permit given the params.
+    ///
+    /// If a permit could not be acquired with the params, return an error with the
+    /// original params back.
+    fn acquire(&mut self, params: Self::Params) -> Result<Self::Permit, Self::Params>;
+
+    /// Return the permit back to the semaphore.
+    ///
+    /// Note: This is not guaranteed to be called for every acquire call.
+    /// Permits can be modified or forgotten.
+    fn release(&mut self, permit: Self::Permit);
+}
+
 /// Generic semaphore performing asynchronous permit acquisition.
 ///
 /// A semaphore maintains a set of permits. Permits are used to synchronize
@@ -97,10 +125,59 @@ impl<S: SemaphoreState + core::fmt::Debug> core::fmt::Debug for Semaphore<S> {
     }
 }
 
+impl<S: SemaphoreState> Semaphore<S> {
+    /// Create a new first-in-first-out semaphore with the given initial state.
+    pub fn new_fifo(state: S) -> Self {
+        Self::new_inner(state, true)
+    }
+
+    /// Create a new last-in-first-out semaphore with the given initial state.
+    pub fn new_lifo(state: S) -> Self {
+        Self::new_inner(state, false)
+    }
+
+    fn new_inner(state: S, fifo: bool) -> Self {
+        let state = QueueState {
+            state,
+            // Safety: during acquire, we ensure that nodes in this queue
+            // will never attempt to use a different queue to read the nodes.
+            queue: PinList::new(unsafe { pin_list::id::DebugChecked::new() }),
+        };
+        Self {
+            state: Mutex::new(state),
+            fifo,
+        }
+    }
+
+    /// Access the state with mutable access.
+    ///
+    /// This gives direct access to the state, be careful not to
+    /// break any of your own state invariants. You can use this
+    /// to peek at the current state, or to modify it, eg to add or
+    /// remove permits from the semaphore.
+    pub fn with_state<R>(&self, f: impl FnOnce(&mut S) -> R) -> R {
+        let mut state = self.state.lock();
+        let res = f(&mut state.state);
+        state.check();
+        res
+    }
+}
+
 struct QueueState<S: SemaphoreState> {
     queue: PinList<PinQueue<S>>,
     state: S,
 }
+
+type PinQueue<S> = dyn pin_list::Types<
+        Id = pin_list::id::DebugChecked,
+        // Some(params), waker -> Pending
+        // None, waker -> Invalid state.
+        Protected = (Option<<S as SemaphoreState>::Params>, Waker),
+        // Ok(permit) -> Ready
+        // Err(params) -> Closed
+        Removed = Result<<S as SemaphoreState>::Permit, <S as SemaphoreState>::Params>,
+        Unprotected = (),
+    >;
 
 impl<S: SemaphoreState> QueueState<S> {
     #[inline]
@@ -122,81 +199,6 @@ impl<S: SemaphoreState> QueueState<S> {
                 }
             }
         }
-    }
-}
-
-type PinQueue<S> = dyn pin_list::Types<
-        Id = pin_list::id::DebugChecked,
-        // Some(params), waker -> Pending
-        // None, waker -> Invalid state.
-        Protected = (Option<<S as SemaphoreState>::Params>, Waker),
-        // Ok(permit) -> Ready
-        // Err(params) -> Closed
-        Removed = Result<<S as SemaphoreState>::Permit, <S as SemaphoreState>::Params>,
-        Unprotected = (),
-    >;
-
-/// The trait defining how [`Semaphore`]s behave.
-pub trait SemaphoreState {
-    /// What type is used to request permits.
-    ///
-    /// An example of this could be `usize` for a counting semaphore,
-    /// if you want to support `acquire_many` type requests.
-    type Params;
-
-    /// The type representing the current permit allocation.
-    ///
-    /// If you have a counting semaphore, this could be the number
-    /// of permits acquired. If this is more like a connection pool,
-    /// this could be a specific object allocation.
-    type Permit;
-
-    /// Acquire a permit given the params.
-    ///
-    /// If a permit could not be acquired with the params, return an error with the
-    /// original params back.
-    fn acquire(&mut self, params: Self::Params) -> Result<Self::Permit, Self::Params>;
-
-    /// Return the permit back to the semaphore.
-    ///
-    /// Note: This is not guaranteed to be called for every acquire call.
-    /// Permits can be modified or forgotten.
-    fn release(&mut self, permit: Self::Permit);
-}
-
-impl<S: SemaphoreState> Semaphore<S> {
-    /// Create a new first-in-first-out semaphore with the given initial state.
-    pub fn new_fifo(state: S) -> Self {
-        Self::new_inner(state, true)
-    }
-
-    /// Create a new last-in-first-out semaphore with the given initial state.
-    pub fn new_lifo(state: S) -> Self {
-        Self::new_inner(state, false)
-    }
-
-    fn new_inner(state: S, fifo: bool) -> Self {
-        let state = QueueState {
-            state,
-            queue: PinList::new(unsafe { pin_list::id::DebugChecked::new() }),
-        };
-        Self {
-            state: Mutex::new(state),
-            fifo,
-        }
-    }
-
-    /// Access the state with mutable access.
-    ///
-    /// This gives direct access to the state, be careful not to
-    /// break any of your own state invariants. You can use this
-    /// to peek at the current state, or to modify it, eg to add or
-    /// remove permits from the semaphore.
-    pub fn with_state<R>(&self, f: impl FnOnce(&mut S) -> R) -> R {
-        let mut state = self.state.lock();
-        let res = f(&mut state.state);
-        state.check();
-        res
     }
 }
 

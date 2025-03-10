@@ -8,8 +8,8 @@ repository = "https://github.com/conradludgate/flag-bearer"
 
 [dependencies]
 pin-project-lite = "0.2"
-parking_lot = "0.12"
-pin-list = "0.1"
+parking_lot = { version = "0.12", default-features = false }
+pin-list = { version = "0.1", default-features = false }
 
 [dev-dependencies]
 tokio = { version = "1", features = ["full"] }
