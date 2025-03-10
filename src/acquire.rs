@@ -111,7 +111,7 @@ pin_project_lite::pin_project! {
 
             // if we were the leader, we might have stopped some other task
             // from progressing. check if a new task is ready.
-            state.check(this.sem.fifo);
+            state.check();
         }
     }
 }
@@ -133,7 +133,11 @@ impl<S: SemaphoreState> Future for Acquire<'_, S> {
                 Err(params) => {
                     // no permit or we are not the leader, so we register into the queue.
                     let waker = cx.waker().clone();
-                    state.queue.push_back(node, (Some(params), waker), ());
+                    if this.sem.fifo {
+                        state.queue.push_back(node, (Some(params), waker), ());
+                    } else {
+                        state.queue.push_front(node, (Some(params), waker), ());
+                    }
                     return Poll::Pending;
                 }
             }

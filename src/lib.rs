@@ -104,18 +104,9 @@ struct QueueState<S: SemaphoreState> {
 
 impl<S: SemaphoreState> QueueState<S> {
     #[inline]
-    fn check(&mut self, fifo: bool) {
-        loop {
-            let mut leader = if fifo {
-                self.queue.cursor_front_mut()
-            } else {
-                self.queue.cursor_back_mut()
-            };
-
-            let Some(p) = leader.protected_mut() else {
-                break;
-            };
-
+    fn check(&mut self) {
+        let mut leader = self.queue.cursor_front_mut();
+        while let Some(p) = leader.protected_mut() {
             let params =
                 p.0.take()
                     .expect("params should be in place. possibly the acquire method panicked");
@@ -204,7 +195,7 @@ impl<S: SemaphoreState> Semaphore<S> {
     pub fn with_state<R>(&self, f: impl FnOnce(&mut S) -> R) -> R {
         let mut state = self.state.lock();
         let res = f(&mut state.state);
-        state.check(self.fifo);
+        state.check();
         res
     }
 }
