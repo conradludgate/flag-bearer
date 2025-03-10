@@ -141,7 +141,7 @@ impl<S: SemaphoreState> Semaphore<S> {
             state,
             // Safety: during acquire, we ensure that nodes in this queue
             // will never attempt to use a different queue to read the nodes.
-            queue: PinList::new(unsafe { pin_list::id::DebugChecked::new() }),
+            queue: Some(PinList::new(unsafe { pin_list::id::DebugChecked::new() })),
         };
         Self {
             state: Mutex::new(state),
@@ -161,10 +161,29 @@ impl<S: SemaphoreState> Semaphore<S> {
         state.check();
         res
     }
+
+    pub fn close(&self) {
+        let Some(mut queue) = self.state.lock().queue.take() else {
+            return;
+        };
+
+        let mut cursor = queue.cursor_front_mut();
+        while let Some(p) = cursor.protected_mut() {
+            let params =
+                p.0.take()
+                    .expect("params should be in place. possibly the acquire method panicked");
+            match cursor.remove_current(Err(params)) {
+                Ok((_, waker)) => waker.wake(),
+                // Safety: with protected_mut, we have just made sure it is in the list
+                Err(_) => unsafe { unreachable_unchecked() },
+            }
+        }
+        debug_assert!(queue.is_empty());
+    }
 }
 
 struct QueueState<S: SemaphoreState> {
-    queue: PinList<PinQueue<S>>,
+    queue: Option<PinList<PinQueue<S>>>,
     state: S,
 }
 
@@ -182,7 +201,8 @@ type PinQueue<S> = dyn pin_list::Types<
 impl<S: SemaphoreState> QueueState<S> {
     #[inline]
     fn check(&mut self) {
-        let mut leader = self.queue.cursor_front_mut();
+        let Some(queue) = &mut self.queue else { return };
+        let mut leader = queue.cursor_front_mut();
         while let Some(p) = leader.protected_mut() {
             let params =
                 p.0.take()

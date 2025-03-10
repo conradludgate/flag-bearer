@@ -45,6 +45,10 @@ mod semaphore {
             Self(flag_bearer::Semaphore::new_fifo(SemaphoreCounter(count)))
         }
 
+        pub fn close(&self) {
+            self.0.close();
+        }
+
         pub async fn acquire(&self) -> Option<Permit<'_>> {
             Some(Permit(self.0.acquire(1).await.ok()?))
         }
@@ -328,6 +332,33 @@ fn fifo_unfair() {
 
     assert!(s.try_acquire_many(1).is_err());
     assert!(s.try_acquire_many_unfair(1).is_ok());
+}
+
+#[test]
+fn closed() {
+    let s = Semaphore::new(0);
+    let mut a1 = pin!(s.acquire_many(3));
+    let mut a2 = pin!(s.acquire_many(2));
+
+    let mut cx = Context::from_waker(noop_waker_ref());
+    assert!(a1.as_mut().poll(&mut cx).is_pending());
+    assert!(a2.as_mut().poll(&mut cx).is_pending());
+
+    assert!(a1.as_mut().poll(&mut cx).is_pending());
+    assert!(a2.as_mut().poll(&mut cx).is_pending());
+
+    s.close();
+
+    let a3 = pin!(s.acquire_many(1));
+    let Poll::Ready(None) = a3.poll(&mut cx) else {
+        panic!()
+    };
+    let Poll::Ready(None) = a2.poll(&mut cx) else {
+        panic!()
+    };
+    let Poll::Ready(None) = a1.poll(&mut cx) else {
+        panic!()
+    };
 }
 
 struct SemaphoreTestCase;

@@ -99,19 +99,28 @@ pin_project_lite::pin_project! {
     impl<'a, S: SemaphoreState> PinnedDrop for Acquire<'a, S> {
         fn drop(this: Pin<&mut Self>) {
             let this = this.project();
-            let Some(node) = this.node.initialized_mut() else { return;};
+            let Some(node) = this.node.initialized_mut() else { return; };
 
             let mut state = this.sem.state.lock();
-            let (data, _unprotected) = node.reset(&mut state.queue);
 
-            // we were woken, but dropped at the same time. release the permit
-            if let NodeData::Removed(Ok(permit)) = data {
-                state.state.release(permit);
-            }
+            if let Some(queue) = &mut state.queue {
+                let (data, _unprotected) = node.reset(queue);
 
-            // if we were the leader, we might have stopped some other task
-            // from progressing. check if a new task is ready.
-            state.check();
+                // we were woken, but dropped at the same time. release the permit
+                if let NodeData::Removed(Ok(permit)) = data {
+                    state.state.release(permit);
+                }
+
+                // if we were the leader, we might have stopped some other task
+                // from progressing. check if a new task is ready.
+                state.check();
+            } else {
+                // Safety: If there is no queue, then we are guaranteed to be removed from it
+                let (permit, ()) = unsafe { node.take_removed_unchecked() };
+                if let Ok(permit) = permit {
+                    state.state.release(permit);
+                }
+            };
         }
     }
 }
@@ -131,19 +140,30 @@ impl<S: SemaphoreState> Future for Acquire<'_, S> {
             match state.unlinked_try_acquire(params, this.sem.fifo, false) {
                 Ok(permit) => return Poll::Ready(Ok(permit)),
                 Err(params) => {
+                    let Some(queue) = &mut state.queue else {
+                        // queue is closed
+                        return Poll::Ready(Err(params));
+                    };
+
                     // no permit or we are not the leader, so we register into the queue.
                     let waker = cx.waker().clone();
                     if this.sem.fifo {
-                        state.queue.push_back(node, (Some(params), waker), ());
+                        queue.push_back(node, (Some(params), waker), ());
                     } else {
-                        state.queue.push_front(node, (Some(params), waker), ());
+                        queue.push_front(node, (Some(params), waker), ());
                     }
                     return Poll::Pending;
                 }
             }
         };
 
-        match init.protected_mut(&mut state.queue) {
+        let Some(queue) = &mut state.queue else {
+            // Safety: If there is no queue, then we are guaranteed to be removed from it
+            let (permit, ()) = unsafe { init.take_removed_unchecked() };
+            return Poll::Ready(permit);
+        };
+
+        match init.protected_mut(queue) {
             // spurious wakeup
             Some((_, waker)) => {
                 waker.clone_from(cx.waker());
@@ -166,9 +186,13 @@ impl<S: SemaphoreState> QueueState<S> {
         fifo: bool,
         unfair: bool,
     ) -> Result<S::Permit, S::Params> {
+        let Some(queue) = &mut self.queue else {
+            return Err(params);
+        };
+
         // if last-in-first-out, we are the last in and thus the leader.
         // if first-in-first-out, we are only the leader if the queue is empty.
-        let is_leader = unfair || !fifo || self.queue.is_empty();
+        let is_leader = unfair || !fifo || queue.is_empty();
 
         // if we are the leader, try and acquire a permit.
         if is_leader {
