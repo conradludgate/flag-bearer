@@ -10,36 +10,20 @@ use hdrhistogram::Histogram;
 fn main() {
     let t = available_parallelism().unwrap().get();
 
-    let slow = t / 2;
-    let fast = t * 2;
     let rounds = 50000;
     let iters = 50;
 
-    println!("flag_bearer[threads = {t}, permits = {slow}]:");
-    let semaphore = semaphore::Semaphore::new(slow);
+    println!("flag_bearer[threads = {t}]:");
+    let semaphore = semaphore::Semaphore::new(0);
     let h = bench(t, rounds, iters, &semaphore, async |s| {
-        black_box(s.acquire().await.unwrap());
+        black_box(s.try_acquire());
     });
     print_results(h);
 
-    println!("flag_bearer[threads = {t}, permits = {fast}]:");
-    let semaphore = semaphore::Semaphore::new(fast);
+    println!("tokio[threads = {t}]:");
+    let semaphore = tokio::sync::Semaphore::new(0);
     let h = bench(t, rounds, iters, &semaphore, async |s| {
-        black_box(s.acquire().await.unwrap());
-    });
-    print_results(h);
-
-    println!("tokio[threads = {t}, permits = {slow}]:");
-    let semaphore = tokio::sync::Semaphore::new(slow);
-    let h = bench(t, rounds, iters, &semaphore, async |s| {
-        drop(black_box(s.acquire().await.unwrap()));
-    });
-    print_results(h);
-
-    println!("tokio[threads = {t}, permits = {fast}]:");
-    let semaphore = tokio::sync::Semaphore::new(fast);
-    let h = bench(t, rounds, iters, &semaphore, async |s| {
-        drop(black_box(s.acquire().await.unwrap()));
+        drop(black_box(s.try_acquire()));
     });
     print_results(h);
 }
@@ -137,8 +121,8 @@ mod semaphore {
             Self(flag_bearer::Semaphore::new_fifo(SemaphoreCounter(count)))
         }
 
-        pub async fn acquire(&self) -> Option<Permit<'_>> {
-            Some(Permit(self.0.acquire(1).await.ok()?))
+        pub fn try_acquire(&self) -> Option<Permit<'_>> {
+            Some(Permit(self.0.try_acquire(1).ok()?))
         }
     }
 }
