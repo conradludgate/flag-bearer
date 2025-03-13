@@ -1,6 +1,6 @@
 [package]
 name = "flag-bearer"
-version = "0.1.0-rc.1"
+version = "0.1.0-rc.2"
 edition = "2024"
 license = "Apache-2.0 OR MIT"
 description = "Generic async semaphores"
@@ -14,7 +14,7 @@ pin-list = { version = "0.1", default-features = false }
 [dev-dependencies]
 tokio = { version = "1", features = ["full"] }
 futures-testing = { git = "https://github.com/conradludgate/futures-testing" }
-futures-util = "0.3"
+futures-util = { version = "0.3", default-features = false }
 
 hdrhistogram = "7.5.4"
 

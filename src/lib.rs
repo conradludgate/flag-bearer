@@ -30,6 +30,51 @@
 //!   Stacking multiple semaphores can be awkward and risk deadlocks.
 //!   Instead, making the state contain all those quantities combined
 //!   can simplify the queueing.
+//!
+//! # Example
+//!
+//! ```
+//!  #[derive(Debug)]
+//! struct SemaphoreCounter(usize);
+//!
+//! impl flag_bearer::SemaphoreState for SemaphoreCounter {
+//!     /// Number of permits to acquire
+//!     type Params = usize;
+//!
+//!     /// Number of permits that have been acquired
+//!     type Permit = usize;
+//!
+//!     fn acquire(&mut self, params: Self::Params) -> Result<Self::Permit, Self::Params> {
+//!         if let Some(available) = self.0.checked_sub(params) {
+//!             self.0 = available;
+//!             Ok(params)
+//!         } else {
+//!             Err(params)
+//!         }
+//!     }
+//!
+//!     fn release(&mut self, permit: Self::Permit) {
+//!         self.0 = self.0.checked_add(permit).unwrap()
+//!     }
+//! }
+//!
+//! # #[tokio::main] async fn main() {
+//! // create a new FIFO semaphore with 20 permits
+//! let semaphore = flag_bearer::Semaphore::new_fifo(SemaphoreCounter(20));
+//!
+//! // acquire a token
+//! let _permit = semaphore.acquire(1).await.expect("semaphore shouldn't be closed");
+//!
+//! // add 20 more permits
+//! semaphore.with_state(|s| s.0 += 20);
+//!
+//! // release a token
+//! drop(_permit);
+//!
+//! // close a semaphore
+//! semaphore.close();
+//! # }
+//! ```
 
 #![no_std]
 
@@ -106,13 +151,29 @@ pub trait SemaphoreState {
 ///   can simplify the queueing.
 pub struct Semaphore<S: SemaphoreState> {
     state: Mutex<QueueState<S>>,
-    fifo: bool,
+    order: FairOrder,
+}
+
+#[derive(Debug, Clone, Copy)]
+enum FairOrder {
+    /// Last in, first out.
+    /// Increases tail latencies, but can have better average performance.
+    Lifo,
+    /// First in, first out.
+    /// Fairer option, but can have cascading failures if queue processing is slow.
+    Fifo,
+}
+
+impl FairOrder {
+    fn is_lifo(&self) -> bool {
+        matches!(self, FairOrder::Lifo)
+    }
 }
 
 impl<S: SemaphoreState + core::fmt::Debug> core::fmt::Debug for Semaphore<S> {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         let mut d = f.debug_struct("Semaphore");
-        d.field("fifo", &self.fifo);
+        d.field("order", &self.order);
         match self.state.try_lock() {
             Some(guard) => {
                 d.field("state", &guard.state);
@@ -128,15 +189,15 @@ impl<S: SemaphoreState + core::fmt::Debug> core::fmt::Debug for Semaphore<S> {
 impl<S: SemaphoreState> Semaphore<S> {
     /// Create a new first-in-first-out semaphore with the given initial state.
     pub fn new_fifo(state: S) -> Self {
-        Self::new_inner(state, true)
+        Self::new_inner(state, FairOrder::Fifo)
     }
 
     /// Create a new last-in-first-out semaphore with the given initial state.
     pub fn new_lifo(state: S) -> Self {
-        Self::new_inner(state, false)
+        Self::new_inner(state, FairOrder::Lifo)
     }
 
-    fn new_inner(state: S, fifo: bool) -> Self {
+    fn new_inner(state: S, order: FairOrder) -> Self {
         let state = QueueState {
             state,
             // Safety: during acquire, we ensure that nodes in this queue
@@ -145,7 +206,7 @@ impl<S: SemaphoreState> Semaphore<S> {
         };
         Self {
             state: Mutex::new(state),
-            fifo,
+            order,
         }
     }
 
@@ -162,6 +223,10 @@ impl<S: SemaphoreState> Semaphore<S> {
         res
     }
 
+    /// Close the semaphore.
+    ///
+    /// All tasks currently waiting to acquire a token will immediately stop.
+    /// No new acquire attempts will succeed.
     pub fn close(&self) {
         let Some(mut queue) = self.state.lock().queue.take() else {
             return;
@@ -222,6 +287,8 @@ impl<S: SemaphoreState> QueueState<S> {
     }
 }
 
+/// The drop-guard for semaphore permits.
+/// Will ensure the permit is released when dropped.
 #[derive(Debug)]
 pub struct Permit<'a, S: SemaphoreState> {
     sem: &'a Semaphore<S>,
@@ -231,6 +298,8 @@ pub struct Permit<'a, S: SemaphoreState> {
 
 impl<'a, S: SemaphoreState> Permit<'a, S> {
     /// Construct a new permit out of thin air, no waiting is required.
+    ///
+    /// This violates the purpose of the semahpore, but is provided for convenience.
     pub fn out_of_thin_air(sem: &'a Semaphore<S>, permit: S::Permit) -> Self {
         Self {
             sem,
@@ -238,18 +307,25 @@ impl<'a, S: SemaphoreState> Permit<'a, S> {
         }
     }
 
+    /// Get read access to the permit value
     pub fn permit(&self) -> &S::Permit {
         &self.permit
     }
 
+    /// Get mut access to the permit value
+    ///
+    /// It is up to the caller to maintain any semaphore invariants
+    /// that might be violated when returning this permit.
     pub fn permit_mut(&mut self) -> &mut S::Permit {
         &mut self.permit
     }
 
+    /// Get read access to the associated semaphore
     pub fn semaphore(&self) -> &'a Semaphore<S> {
         self.sem
     }
 
+    /// Do not release the permit to the semaphore.
     pub fn take(self) -> S::Permit {
         let mut this = ManuallyDrop::new(self);
         unsafe { ManuallyDrop::take(&mut this.permit) }
@@ -284,6 +360,6 @@ mod test {
     fn debug() {
         let s = crate::Semaphore::new_fifo(Dummy);
         let s = std::format!("{s:?}");
-        assert_eq!(s, "Semaphore { fifo: true, state: Dummy, .. }");
+        assert_eq!(s, "Semaphore { order: Fifo, state: Dummy, .. }");
     }
 }

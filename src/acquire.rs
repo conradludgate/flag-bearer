@@ -6,7 +6,7 @@ use core::{
 
 use pin_list::{Node, NodeData};
 
-use crate::{Permit, PinQueue, QueueState, Semaphore, SemaphoreState};
+use crate::{FairOrder, Permit, PinQueue, QueueState, Semaphore, SemaphoreState};
 
 impl<S: SemaphoreState> Semaphore<S> {
     #[inline]
@@ -25,10 +25,10 @@ impl<S: SemaphoreState> Semaphore<S> {
     fn try_acquire_inner(
         &self,
         params: S::Params,
-        unfair: bool,
+        fairness: Fairness,
     ) -> Result<S::Permit, TryAcquireError<S::Params>> {
         let mut state = self.state.lock();
-        match state.unlinked_try_acquire(params, self.fifo, unfair) {
+        match state.unlinked_try_acquire(params, self.order, fairness) {
             Ok(permit) => Ok(permit),
             Err(params) => Err(TryAcquireError::NoPermits(params)),
         }
@@ -66,7 +66,7 @@ impl<S: SemaphoreState> Semaphore<S> {
         &self,
         params: S::Params,
     ) -> Result<Permit<'_, S>, TryAcquireError<S::Params>> {
-        let permit = self.try_acquire_inner(params, false)?;
+        let permit = self.try_acquire_inner(params, Fairness::Fair)?;
         Ok(Permit::out_of_thin_air(self, permit))
     }
 
@@ -83,7 +83,7 @@ impl<S: SemaphoreState> Semaphore<S> {
         &self,
         params: S::Params,
     ) -> Result<Permit<'_, S>, TryAcquireError<S::Params>> {
-        let permit = self.try_acquire_inner(params, true)?;
+        let permit = self.try_acquire_inner(params, Fairness::Unfair)?;
         Ok(Permit::out_of_thin_air(self, permit))
     }
 }
@@ -137,7 +137,7 @@ impl<S: SemaphoreState> Future for Acquire<'_, S> {
             let params = this.params.take().unwrap();
             let node = this.node.as_mut();
 
-            match state.unlinked_try_acquire(params, this.sem.fifo, false) {
+            match state.unlinked_try_acquire(params, this.sem.order, Fairness::Fair) {
                 Ok(permit) => return Poll::Ready(Ok(permit)),
                 Err(params) => {
                     let Some(queue) = &mut state.queue else {
@@ -147,11 +147,10 @@ impl<S: SemaphoreState> Future for Acquire<'_, S> {
 
                     // no permit or we are not the leader, so we register into the queue.
                     let waker = cx.waker().clone();
-                    if this.sem.fifo {
-                        queue.push_back(node, (Some(params), waker), ());
-                    } else {
-                        queue.push_front(node, (Some(params), waker), ());
-                    }
+                    match this.sem.order {
+                        FairOrder::Lifo => queue.push_front(node, (Some(params), waker), ()),
+                        FairOrder::Fifo => queue.push_back(node, (Some(params), waker), ()),
+                    };
                     return Poll::Pending;
                 }
             }
@@ -178,13 +177,24 @@ impl<S: SemaphoreState> Future for Acquire<'_, S> {
     }
 }
 
+enum Fairness {
+    Fair,
+    Unfair,
+}
+
+impl Fairness {
+    fn is_unfair(&self) -> bool {
+        matches!(self, Fairness::Unfair)
+    }
+}
+
 impl<S: SemaphoreState> QueueState<S> {
     #[inline]
     fn unlinked_try_acquire(
         &mut self,
         params: S::Params,
-        fifo: bool,
-        unfair: bool,
+        order: FairOrder,
+        fairness: Fairness,
     ) -> Result<S::Permit, S::Params> {
         let Some(queue) = &mut self.queue else {
             return Err(params);
@@ -192,7 +202,7 @@ impl<S: SemaphoreState> QueueState<S> {
 
         // if last-in-first-out, we are the last in and thus the leader.
         // if first-in-first-out, we are only the leader if the queue is empty.
-        let is_leader = unfair || !fifo || queue.is_empty();
+        let is_leader = fairness.is_unfair() || order.is_lifo() || queue.is_empty();
 
         // if we are the leader, try and acquire a permit.
         if is_leader {
@@ -209,7 +219,9 @@ impl<S: SemaphoreState> QueueState<S> {
 /// The error returned by [`try_acquire`](Semaphore::try_acquire)
 #[derive(Debug, PartialEq, Eq)]
 pub enum TryAcquireError<P> {
+    /// The semaphore had no permits to give out right now.
     NoPermits(P),
+    /// The semaphore is closed.
     Closed(P),
 }
 
@@ -226,6 +238,7 @@ impl<P> fmt::Display for TryAcquireError<P> {
 #[non_exhaustive]
 #[derive(Debug, PartialEq, Eq)]
 pub struct AcquireError<P> {
+    /// The params that was used in the acquire request
     pub params: P,
 }
 
