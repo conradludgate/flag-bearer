@@ -1,26 +1,3 @@
-[package]
-name = "flag-bearer"
-version = "0.1.0-rc.3"
-edition = "2024"
-license = "Apache-2.0 OR MIT"
-description = "Generic async semaphores"
-repository = "https://github.com/conradludgate/flag-bearer"
-
-[dependencies]
-parking_lot = { version = "0.12", default-features = false }
-pin-list = { version = "0.1", default-features = false }
-
-[dev-dependencies]
-tokio = { version = "1", features = ["full"] }
-futures-testing = { git = "https://github.com/conradludgate/futures-testing" }
-futures-util = { version = "0.3", default-features = false }
-
-hdrhistogram = "7.5.4"
-
-[[bench]]
-harness = false
-name = "acquire"
-
-[[bench]]
-harness = false
-name = "try_acquire"
+[workspace]
+members = ["flag-bearer", "flag-bearer-tests"]
+resolver = "2"

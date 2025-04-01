@@ -58,7 +58,7 @@
 //!     }
 //! }
 //!
-//! # #[tokio::main] async fn main() {
+//! # pollster::block_on(async {
 //! // create a new FIFO semaphore with 20 permits
 //! let semaphore = flag_bearer::Semaphore::new_fifo(SemaphoreCounter(20));
 //!
@@ -73,7 +73,7 @@
 //!
 //! // close a semaphore
 //! semaphore.close();
-//! # }
+//! # })
 //! ```
 
 #![no_std]
@@ -359,10 +359,6 @@ impl<S: SemaphoreState + ?Sized> Drop for Permit<'_, S> {
 
 #[cfg(test)]
 mod test {
-    use std::sync::Arc;
-
-    use crate::{Semaphore, SemaphoreState};
-
     #[derive(Debug)]
     struct Dummy;
 
@@ -382,37 +378,5 @@ mod test {
         let s = crate::Semaphore::new_fifo(Dummy);
         let s = std::format!("{s:?}");
         assert_eq!(s, "Semaphore { order: Fifo, state: Dummy, .. }");
-    }
-
-    #[derive(Debug)]
-    struct Counter(u64);
-
-    impl crate::SemaphoreState for Counter {
-        type Params = ();
-        type Permit = ();
-
-        fn acquire(&mut self, p: Self::Params) -> Result<Self::Permit, Self::Params> {
-            let Some(n) = self.0.checked_sub(1) else {
-                return Err(p);
-            };
-            self.0 = n;
-            Ok(p)
-        }
-
-        fn release(&mut self, _: Self::Permit) {
-            self.0 = self.0.saturating_add(1);
-        }
-    }
-
-    #[tokio::test]
-    async fn trait_object() {
-        let s1: Arc<Semaphore<dyn SemaphoreState<Params = (), Permit = ()>>> =
-            Arc::new(Semaphore::new_fifo(Dummy));
-
-        let s2: Arc<Semaphore<dyn SemaphoreState<Params = (), Permit = ()>>> =
-            Arc::new(Semaphore::new_fifo(Counter(1)));
-
-        let _p1 = s1.acquire(()).await.unwrap();
-        let _p2 = s2.acquire(()).await.unwrap();
     }
 }
