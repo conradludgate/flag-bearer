@@ -98,6 +98,8 @@ mod semaphore {
         /// Number of permits that have been acquired
         type Permit = usize;
 
+        type Closeable = flag_bearer::Uncloseable;
+
         fn acquire(&mut self, params: Self::Params) -> Result<Self::Permit, Self::Params> {
             if params <= self.0 {
                 self.0 -= params;

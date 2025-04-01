@@ -65,6 +65,7 @@ impl AimdState {
 impl SemaphoreState for AimdState {
     type Params = ();
     type Permit = ();
+    type Closeable = flag_bearer::Uncloseable;
 
     fn acquire(&mut self, _: ()) -> Result<(), ()> {
         if self.acquired < self.state.limit {

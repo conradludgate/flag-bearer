@@ -6,14 +6,17 @@ use core::{
 
 use pin_list::{Node, NodeData};
 
-use crate::{FairOrder, IsCloseable, Permit, PinQueue, QueueState, Semaphore, SemaphoreState};
+use crate::{
+    FairOrder, Permit, PinQueue, QueueState, Semaphore, SemaphoreState, private::IsCloseable,
+};
 
-impl<S: SemaphoreState + ?Sized, C: IsCloseable> Semaphore<S, C> {
+impl<S: SemaphoreState + ?Sized> Semaphore<S> {
     #[inline]
     fn acquire_inner(
         &self,
         params: S::Params,
-    ) -> impl Future<Output = Result<S::Permit, C::Closed<S::Params>>> {
+    ) -> impl Future<Output = Result<S::Permit, <S::Closeable as IsCloseable>::Closed<S::Params>>>
+    {
         Acquire {
             sem: self,
             node: Node::new(),
@@ -26,7 +29,7 @@ impl<S: SemaphoreState + ?Sized, C: IsCloseable> Semaphore<S, C> {
         &self,
         params: S::Params,
         fairness: Fairness,
-    ) -> Result<S::Permit, TryAcquireError<S::Params, C>> {
+    ) -> Result<S::Permit, TryAcquireError<S::Params, S::Closeable>> {
         let mut state = self.state.lock();
         match state.unlinked_try_acquire(params, self.order, fairness) {
             Ok(permit) => Ok(permit),
@@ -41,11 +44,11 @@ impl<S: SemaphoreState + ?Sized, C: IsCloseable> Semaphore<S, C> {
     pub async fn acquire(
         &self,
         params: S::Params,
-    ) -> Result<Permit<'_, S, C>, C::Closed<AcquireError<S::Params>>> {
+    ) -> Result<Permit<'_, S>, <S::Closeable as IsCloseable>::Closed<AcquireError<S::Params>>> {
         let permit = self
             .acquire_inner(params)
             .await
-            .map_err(|params| C::map(params, |params| AcquireError { params }))?;
+            .map_err(|params| S::Closeable::map(params, |params| AcquireError { params }))?;
         Ok(Permit::out_of_thin_air(self, permit))
     }
 
@@ -65,7 +68,7 @@ impl<S: SemaphoreState + ?Sized, C: IsCloseable> Semaphore<S, C> {
     pub fn try_acquire(
         &self,
         params: S::Params,
-    ) -> Result<Permit<'_, S, C>, TryAcquireError<S::Params, C>> {
+    ) -> Result<Permit<'_, S>, TryAcquireError<S::Params, S::Closeable>> {
         let permit = self.try_acquire_inner(params, Fairness::Fair)?;
         Ok(Permit::out_of_thin_air(self, permit))
     }
@@ -82,20 +85,20 @@ impl<S: SemaphoreState + ?Sized, C: IsCloseable> Semaphore<S, C> {
     pub fn try_acquire_unfair(
         &self,
         params: S::Params,
-    ) -> Result<Permit<'_, S, C>, TryAcquireError<S::Params, C>> {
+    ) -> Result<Permit<'_, S>, TryAcquireError<S::Params, S::Closeable>> {
         let permit = self.try_acquire_inner(params, Fairness::Unfair)?;
         Ok(Permit::out_of_thin_air(self, permit))
     }
 }
 
-struct Acquire<'a, S: SemaphoreState + ?Sized, C: IsCloseable> {
+struct Acquire<'a, S: SemaphoreState + ?Sized> {
     // #[pin]
-    node: Node<PinQueue<S::Params, S::Permit, C>>,
-    sem: &'a Semaphore<S, C>,
+    node: Node<PinQueue<S::Params, S::Permit, S::Closeable>>,
+    sem: &'a Semaphore<S>,
     params: Option<S::Params>,
 }
 
-impl<S: SemaphoreState + ?Sized, C: IsCloseable> Acquire<'_, S, C> {
+impl<S: SemaphoreState + ?Sized> Acquire<'_, S> {
     fn pinned_drop(this: Pin<&mut Self>) {
         let this = this.project();
         let Some(node) = this.node.initialized_mut() else {
@@ -122,17 +125,17 @@ impl<S: SemaphoreState + ?Sized, C: IsCloseable> Acquire<'_, S, C> {
 
 const _: () = {
     #[allow(clippy::type_complexity)]
-    struct Projection<'__pin, 'a, S: SemaphoreState + ?Sized, C: IsCloseable>
+    struct Projection<'__pin, 'a, S: SemaphoreState + ?Sized>
     where
-        Acquire<'a, S, C>: '__pin,
+        Acquire<'a, S>: '__pin,
     {
-        sem: &'__pin mut &'a Semaphore<S, C>,
-        node: Pin<&'__pin mut Node<PinQueue<S::Params, S::Permit, C>>>,
+        sem: &'__pin mut &'a Semaphore<S>,
+        node: Pin<&'__pin mut Node<PinQueue<S::Params, S::Permit, S::Closeable>>>,
         params: &'__pin mut Option<S::Params>,
     }
 
-    impl<'a, S: SemaphoreState + ?Sized, C: IsCloseable> Acquire<'a, S, C> {
-        fn project<'__pin>(self: Pin<&'__pin mut Self>) -> Projection<'__pin, 'a, S, C> {
+    impl<'a, S: SemaphoreState + ?Sized> Acquire<'a, S> {
+        fn project<'__pin>(self: Pin<&'__pin mut Self>) -> Projection<'__pin, 'a, S> {
             // Safety: This is manual pin-projection. We only need `node` to be `Pin`ned.
             unsafe {
                 let Self { sem, node, params } = self.get_unchecked_mut();
@@ -145,7 +148,7 @@ const _: () = {
         }
     }
 
-    impl<S: SemaphoreState + ?Sized, C: IsCloseable> Drop for Acquire<'_, S, C> {
+    impl<S: SemaphoreState + ?Sized> Drop for Acquire<'_, S> {
         fn drop(&mut self) {
             // Safety: the value cannot move after the drop phase
             // and we are by definition dropping the value before releasing the memory.
@@ -155,8 +158,8 @@ const _: () = {
     }
 };
 
-impl<S: SemaphoreState + ?Sized, C: IsCloseable> Future for Acquire<'_, S, C> {
-    type Output = Result<S::Permit, C::Closed<S::Params>>;
+impl<S: SemaphoreState + ?Sized> Future for Acquire<'_, S> {
+    type Output = Result<S::Permit, <S::Closeable as IsCloseable>::Closed<S::Params>>;
 
     fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
         let mut this = self.project();
@@ -174,7 +177,9 @@ impl<S: SemaphoreState + ?Sized, C: IsCloseable> Future for Acquire<'_, S, C> {
                     let queue = match &mut state.queue {
                         Ok(queue) => queue,
                         // unreachable?
-                        Err(closed) => return Poll::Ready(Err(C::from_closed(closed, params))),
+                        Err(closed) => {
+                            return Poll::Ready(Err(S::Closeable::from_closed(closed, params)));
+                        }
                     };
 
                     // no permit or we are not the leader, so we register into the queue.
@@ -223,17 +228,21 @@ impl Fairness {
     }
 }
 
-impl<S: SemaphoreState + ?Sized, C: IsCloseable> QueueState<S, C> {
+impl<S: SemaphoreState + ?Sized> QueueState<S> {
     #[inline]
     fn unlinked_try_acquire(
         &mut self,
         params: S::Params,
         order: FairOrder,
         fairness: Fairness,
-    ) -> Result<S::Permit, TryAcquireError<S::Params, C>> {
+    ) -> Result<S::Permit, TryAcquireError<S::Params, S::Closeable>> {
         let queue = match &mut self.queue {
             Ok(queue) => queue,
-            Err(closed) => return Err(TryAcquireError::Closed(C::from_closed(closed, params))),
+            Err(closed) => {
+                return Err(TryAcquireError::Closed(S::Closeable::from_closed(
+                    closed, params,
+                )));
+            }
         };
 
         // if last-in-first-out, we are the last in and thus the leader.

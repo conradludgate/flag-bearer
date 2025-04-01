@@ -10,6 +10,7 @@ struct Pool {
 impl SemaphoreState for Pool {
     type Params = ();
     type Permit = Conn;
+    type Closeable = flag_bearer::Uncloseable;
 
     fn acquire(&mut self, params: Self::Params) -> Result<Self::Permit, Self::Params> {
         self.objects.pop().ok_or(params)
