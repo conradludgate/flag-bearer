@@ -8,7 +8,7 @@ use pin_list::{Node, NodeData};
 
 use crate::{FairOrder, Permit, PinQueue, QueueState, Semaphore, SemaphoreState};
 
-impl<S: SemaphoreState> Semaphore<S> {
+impl<S: SemaphoreState + ?Sized> Semaphore<S> {
     #[inline]
     fn acquire_inner(
         &self,
@@ -88,44 +88,70 @@ impl<S: SemaphoreState> Semaphore<S> {
     }
 }
 
-pin_project_lite::pin_project! {
-    struct Acquire<'a, S: SemaphoreState> {
-        sem: &'a Semaphore<S>,
-        #[pin]
-        node: Node<PinQueue<S>>,
-        params: Option<S::Params>,
-    }
+struct Acquire<'a, S: SemaphoreState + ?Sized> {
+    // #[pin]
+    node: Node<PinQueue<S::Params, S::Permit>>,
+    sem: &'a Semaphore<S>,
+    params: Option<S::Params>,
+}
 
-    impl<'a, S: SemaphoreState> PinnedDrop for Acquire<'a, S> {
-        fn drop(this: Pin<&mut Self>) {
-            let this = this.project();
-            let Some(node) = this.node.initialized_mut() else { return; };
-
-            let mut state = this.sem.state.lock();
-
-            if let Some(queue) = &mut state.queue {
-                let (data, _unprotected) = node.reset(queue);
-
-                // we were woken, but dropped at the same time. release the permit
-                if let NodeData::Removed(Ok(permit)) = data {
-                    state.state.release(permit);
-                }
-
-                // if we were the leader, we might have stopped some other task
-                // from progressing. check if a new task is ready.
-                state.check();
-            } else {
-                // Safety: If there is no queue, then we are guaranteed to be removed from it
-                let (permit, ()) = unsafe { node.take_removed_unchecked() };
-                if let Ok(permit) = permit {
-                    state.state.release(permit);
-                }
-            };
-        }
+impl<S: SemaphoreState + ?Sized> Acquire<'_, S> {
+    fn pinned_drop(this: Pin<&mut Self>) {
+        let this = this.project();
+        let Some(node) = this.node.initialized_mut() else {
+            return;
+        };
+        let mut state = this.sem.state.lock();
+        if let Some(queue) = &mut state.queue {
+            let (data, _unprotected) = node.reset(queue);
+            if let NodeData::Removed(Ok(permit)) = data {
+                state.state.release(permit);
+            }
+            state.check();
+        } else {
+            let (permit, ()) = unsafe { node.take_removed_unchecked() };
+            if let Ok(permit) = permit {
+                state.state.release(permit);
+            }
+        };
     }
 }
 
-impl<S: SemaphoreState> Future for Acquire<'_, S> {
+const _: () = {
+    struct Projection<'__pin, 'a, S: SemaphoreState + ?Sized>
+    where
+        Acquire<'a, S>: '__pin,
+    {
+        sem: &'__pin mut &'a Semaphore<S>,
+        node: Pin<&'__pin mut Node<PinQueue<S::Params, S::Permit>>>,
+        params: &'__pin mut Option<S::Params>,
+    }
+
+    impl<'a, S: SemaphoreState + ?Sized> Acquire<'a, S> {
+        fn project<'__pin>(self: Pin<&'__pin mut Self>) -> Projection<'__pin, 'a, S> {
+            // Safety: This is manual pin-projection. We only need `node` to be `Pin`ned.
+            unsafe {
+                let Self { sem, node, params } = self.get_unchecked_mut();
+                Projection {
+                    node: Pin::new_unchecked(node),
+                    sem,
+                    params,
+                }
+            }
+        }
+    }
+
+    impl<S: SemaphoreState + ?Sized> Drop for Acquire<'_, S> {
+        fn drop(&mut self) {
+            // Safety: the value cannot move after the drop phase
+            // and we are by definition dropping the value before releasing the memory.
+            let pinned_self: Pin<&mut Self> = unsafe { Pin::new_unchecked(self) };
+            Self::pinned_drop(pinned_self);
+        }
+    }
+};
+
+impl<S: SemaphoreState + ?Sized> Future for Acquire<'_, S> {
     type Output = Result<S::Permit, S::Params>;
 
     fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
@@ -188,7 +214,7 @@ impl Fairness {
     }
 }
 
-impl<S: SemaphoreState> QueueState<S> {
+impl<S: SemaphoreState + ?Sized> QueueState<S> {
     #[inline]
     fn unlinked_try_acquire(
         &mut self,

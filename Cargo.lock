@@ -116,7 +116,6 @@ dependencies = [
  "hdrhistogram",
  "parking_lot",
  "pin-list",
- "pin-project-lite",
  "tokio",
 ]
 

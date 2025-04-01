@@ -149,9 +149,9 @@ pub trait SemaphoreState {
 ///   Stacking multiple semaphores can be awkward and risk deadlocks.
 ///   Instead, making the state contain all those quantities combined
 ///   can simplify the queueing.
-pub struct Semaphore<S: SemaphoreState> {
-    state: Mutex<QueueState<S>>,
+pub struct Semaphore<S: SemaphoreState + ?Sized> {
     order: FairOrder,
+    state: Mutex<QueueState<S>>,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -209,7 +209,9 @@ impl<S: SemaphoreState> Semaphore<S> {
             order,
         }
     }
+}
 
+impl<S: SemaphoreState + ?Sized> Semaphore<S> {
     /// Access the state with mutable access.
     ///
     /// This gives direct access to the state, be careful not to
@@ -247,23 +249,28 @@ impl<S: SemaphoreState> Semaphore<S> {
     }
 }
 
-struct QueueState<S: SemaphoreState> {
-    queue: Option<PinList<PinQueue<S>>>,
+// don't question the weird bounds here...
+struct QueueState<
+    S: SemaphoreState<Params = Params, Permit = Permit> + ?Sized,
+    Params = <S as SemaphoreState>::Params,
+    Permit = <S as SemaphoreState>::Permit,
+> {
+    queue: Option<PinList<PinQueue<Params, Permit>>>,
     state: S,
 }
 
-type PinQueue<S> = dyn pin_list::Types<
+type PinQueue<Params, Permit> = dyn pin_list::Types<
         Id = pin_list::id::DebugChecked,
         // Some(params), waker -> Pending
         // None, waker -> Invalid state.
-        Protected = (Option<<S as SemaphoreState>::Params>, Waker),
+        Protected = (Option<Params>, Waker),
         // Ok(permit) -> Ready
         // Err(params) -> Closed
-        Removed = Result<<S as SemaphoreState>::Permit, <S as SemaphoreState>::Params>,
+        Removed = Result<Permit, Params>,
         Unprotected = (),
     >;
 
-impl<S: SemaphoreState> QueueState<S> {
+impl<S: SemaphoreState + ?Sized> QueueState<S> {
     #[inline]
     fn check(&mut self) {
         let Some(queue) = &mut self.queue else { return };
@@ -289,14 +296,24 @@ impl<S: SemaphoreState> QueueState<S> {
 
 /// The drop-guard for semaphore permits.
 /// Will ensure the permit is released when dropped.
-#[derive(Debug)]
-pub struct Permit<'a, S: SemaphoreState> {
+pub struct Permit<'a, S: SemaphoreState + ?Sized> {
     sem: &'a Semaphore<S>,
     // this is never dropped because it's returned to the semaphore on drop
     permit: ManuallyDrop<S::Permit>,
 }
 
-impl<'a, S: SemaphoreState> Permit<'a, S> {
+impl<S: SemaphoreState + ?Sized> core::fmt::Debug for Permit<'_, S>
+where
+    S::Permit: core::fmt::Debug,
+{
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.debug_struct("Permit")
+            .field("permit", &self.permit)
+            .finish_non_exhaustive()
+    }
+}
+
+impl<'a, S: SemaphoreState + ?Sized> Permit<'a, S> {
     /// Construct a new permit out of thin air, no waiting is required.
     ///
     /// This violates the purpose of the semahpore, but is provided for convenience.
@@ -332,7 +349,7 @@ impl<'a, S: SemaphoreState> Permit<'a, S> {
     }
 }
 
-impl<S: SemaphoreState> Drop for Permit<'_, S> {
+impl<S: SemaphoreState + ?Sized> Drop for Permit<'_, S> {
     fn drop(&mut self) {
         // Safety: only taken on drop.
         let permit = unsafe { ManuallyDrop::take(&mut self.permit) };
@@ -342,6 +359,10 @@ impl<S: SemaphoreState> Drop for Permit<'_, S> {
 
 #[cfg(test)]
 mod test {
+    use std::sync::Arc;
+
+    use crate::{Semaphore, SemaphoreState};
+
     #[derive(Debug)]
     struct Dummy;
 
@@ -361,5 +382,37 @@ mod test {
         let s = crate::Semaphore::new_fifo(Dummy);
         let s = std::format!("{s:?}");
         assert_eq!(s, "Semaphore { order: Fifo, state: Dummy, .. }");
+    }
+
+    #[derive(Debug)]
+    struct Counter(u64);
+
+    impl crate::SemaphoreState for Counter {
+        type Params = ();
+        type Permit = ();
+
+        fn acquire(&mut self, p: Self::Params) -> Result<Self::Permit, Self::Params> {
+            let Some(n) = self.0.checked_sub(1) else {
+                return Err(p);
+            };
+            self.0 = n;
+            Ok(p)
+        }
+
+        fn release(&mut self, _: Self::Permit) {
+            self.0 = self.0.saturating_add(1);
+        }
+    }
+
+    #[tokio::test]
+    async fn trait_object() {
+        let s1: Arc<Semaphore<dyn SemaphoreState<Params = (), Permit = ()>>> =
+            Arc::new(Semaphore::new_fifo(Dummy));
+
+        let s2: Arc<Semaphore<dyn SemaphoreState<Params = (), Permit = ()>>> =
+            Arc::new(Semaphore::new_fifo(Counter(1)));
+
+        let _p1 = s1.acquire(()).await.unwrap();
+        let _p2 = s2.acquire(()).await.unwrap();
     }
 }
