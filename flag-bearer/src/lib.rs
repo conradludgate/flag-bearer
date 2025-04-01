@@ -81,7 +81,7 @@
 
 #![no_std]
 
-use core::{convert::Infallible, hint::unreachable_unchecked, mem::ManuallyDrop, task::Waker};
+use core::{hint::unreachable_unchecked, mem::ManuallyDrop, task::Waker};
 
 #[cfg(test)]
 extern crate std;
@@ -272,18 +272,15 @@ mod private {
     }
 }
 
-// pub trait IsCloseable: private::IsCloseable {}
+/// Controls whether a [`Semaphore`] is closeable.
+pub enum Closeable {}
 
-#[non_exhaustive]
-pub struct Closeable;
-
-#[non_exhaustive]
-pub struct Uncloseable;
+/// Controls whether a [`Semaphore`] is not closeable.
+pub enum Uncloseable {}
 
 impl private::IsCloseable for Closeable {
     type Closed<P> = P;
-    fn from_closed<P>(c: &Self::Closed<()>, p: P) -> Self::Closed<P> {
-        let () = c;
+    fn from_closed<P>((): &Self::Closed<()>, p: P) -> Self::Closed<P> {
         p
     }
     fn map<P, R>(p: Self::Closed<P>, f: impl FnOnce(P) -> R) -> Self::Closed<R> {
@@ -291,7 +288,7 @@ impl private::IsCloseable for Closeable {
     }
 }
 impl private::IsCloseable for Uncloseable {
-    type Closed<P> = Infallible;
+    type Closed<P> = Self;
     fn from_closed<P>(c: &Self::Closed<()>, _p: P) -> Self::Closed<P> {
         match *c {}
     }
@@ -299,8 +296,20 @@ impl private::IsCloseable for Uncloseable {
         match p {}
     }
 }
-// impl IsCloseable for Closeable {}
-// impl IsCloseable for Uncloseable {}
+
+impl core::fmt::Display for Uncloseable {
+    fn fmt(&self, _f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        match *self {}
+    }
+}
+
+impl core::fmt::Debug for Uncloseable {
+    fn fmt(&self, _f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        match *self {}
+    }
+}
+
+impl core::error::Error for Uncloseable {}
 
 // don't question the weird bounds here...
 struct QueueState<

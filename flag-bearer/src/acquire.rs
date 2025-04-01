@@ -176,10 +176,9 @@ impl<S: SemaphoreState + ?Sized> Future for Acquire<'_, S> {
                 Err(TryAcquireError::NoPermits(params)) => {
                     let queue = match &mut state.queue {
                         Ok(queue) => queue,
-                        // unreachable?
-                        Err(closed) => {
-                            return Poll::Ready(Err(S::Closeable::from_closed(closed, params)));
-                        }
+                        // Safety: if the queue was closed, we would get a `Closed` error type.
+                        // It was not closed, thus it still isn't closed.
+                        Err(_closed) => unsafe { core::hint::unreachable_unchecked() },
                     };
 
                     // no permit or we are not the leader, so we register into the queue.
