@@ -232,6 +232,11 @@ impl<S: SemaphoreState + ?Sized> Semaphore<S> {
         state.check();
         res
     }
+
+    /// Check if the semaphore is closed
+    pub fn is_closed(&self) -> bool {
+        <S::Closeable as private::IsCloseable>::CLOSE && self.state.lock().queue.is_err()
+    }
 }
 
 impl<S: SemaphoreState<Closeable = Closeable> + ?Sized> Semaphore<S> {
@@ -257,15 +262,11 @@ impl<S: SemaphoreState<Closeable = Closeable> + ?Sized> Semaphore<S> {
         }
         debug_assert!(queue.is_empty());
     }
-
-    /// Check if the semaphore is closed
-    pub fn is_closed(&self) -> bool {
-        self.state.lock().queue.is_err()
-    }
 }
 
 mod private {
     pub trait IsCloseable {
+        const CLOSE: bool;
         type Closed<P>;
         fn from_closed<P>(c: &Self::Closed<()>, p: P) -> Self::Closed<P>;
         fn map<P, R>(p: Self::Closed<P>, f: impl FnOnce(P) -> R) -> Self::Closed<R>;
@@ -279,6 +280,7 @@ pub enum Closeable {}
 pub enum Uncloseable {}
 
 impl private::IsCloseable for Closeable {
+    const CLOSE: bool = true;
     type Closed<P> = P;
     fn from_closed<P>((): &Self::Closed<()>, p: P) -> Self::Closed<P> {
         p
@@ -288,6 +290,7 @@ impl private::IsCloseable for Closeable {
     }
 }
 impl private::IsCloseable for Uncloseable {
+    const CLOSE: bool = false;
     type Closed<P> = Self;
     fn from_closed<P>(c: &Self::Closed<()>, _p: P) -> Self::Closed<P> {
         match *c {}
@@ -423,7 +426,7 @@ impl<S: SemaphoreState + ?Sized> Drop for Permit<'_, S> {
 
 #[cfg(test)]
 mod test {
-    use crate::Uncloseable;
+    use crate::{Closeable, Uncloseable};
 
     #[derive(Debug)]
     struct Dummy;
@@ -445,5 +448,31 @@ mod test {
         let s = crate::Semaphore::new_fifo(Dummy);
         let s = std::format!("{s:?}");
         assert_eq!(s, "Semaphore { order: Fifo, state: Dummy, .. }");
+    }
+
+    #[derive(Debug)]
+    struct DummyCloseable;
+
+    impl crate::SemaphoreState for DummyCloseable {
+        type Params = ();
+        type Permit = ();
+        type Closeable = Closeable;
+
+        fn acquire(&mut self, _params: Self::Params) -> Result<Self::Permit, Self::Params> {
+            Ok(())
+        }
+
+        fn release(&mut self, _permit: Self::Permit) {}
+    }
+
+    #[test]
+    fn is_closed() {
+        let s = crate::Semaphore::new_fifo(Dummy);
+        assert!(!s.is_closed());
+
+        let s = crate::Semaphore::new_fifo(DummyCloseable);
+        assert!(!s.is_closed());
+        s.close();
+        assert!(s.is_closed());
     }
 }
