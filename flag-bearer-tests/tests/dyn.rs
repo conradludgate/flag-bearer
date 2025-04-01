@@ -44,6 +44,6 @@ async fn trait_object() {
     let s2: Arc<Semaphore<dyn SemaphoreState<Params = (), Permit = ()>>> =
         Arc::new(Semaphore::new_fifo(Counter(1)));
 
-    let _p1 = s1.acquire(()).await.unwrap();
-    let _p2 = s2.acquire(()).await.unwrap();
+    let _p1 = s1.acquire(()).await.unwrap_or_else(|x| match x {});
+    let _p2 = s2.acquire(()).await.unwrap_or_else(|x| match x {});
 }

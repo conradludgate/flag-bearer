@@ -60,7 +60,7 @@
 //!
 //! # pollster::block_on(async {
 //! // create a new FIFO semaphore with 20 permits
-//! let semaphore = flag_bearer::Semaphore::new_fifo(SemaphoreCounter(20));
+//! let semaphore = flag_bearer::Semaphore::new_closeable_fifo(SemaphoreCounter(20));
 //!
 //! // acquire a token
 //! let _permit = semaphore.acquire(1).await.expect("semaphore shouldn't be closed");
@@ -78,7 +78,7 @@
 
 #![no_std]
 
-use core::{hint::unreachable_unchecked, mem::ManuallyDrop, task::Waker};
+use core::{convert::Infallible, hint::unreachable_unchecked, mem::ManuallyDrop, task::Waker};
 
 #[cfg(test)]
 extern crate std;
@@ -149,9 +149,9 @@ pub trait SemaphoreState {
 ///   Stacking multiple semaphores can be awkward and risk deadlocks.
 ///   Instead, making the state contain all those quantities combined
 ///   can simplify the queueing.
-pub struct Semaphore<S: SemaphoreState + ?Sized> {
+pub struct Semaphore<S: SemaphoreState + ?Sized, C: IsCloseable = Uncloseable> {
     order: FairOrder,
-    state: Mutex<QueueState<S>>,
+    state: Mutex<QueueState<S, C>>,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -170,7 +170,7 @@ impl FairOrder {
     }
 }
 
-impl<S: SemaphoreState + core::fmt::Debug> core::fmt::Debug for Semaphore<S> {
+impl<S: SemaphoreState + core::fmt::Debug, C: IsCloseable> core::fmt::Debug for Semaphore<S, C> {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         let mut d = f.debug_struct("Semaphore");
         d.field("order", &self.order);
@@ -186,7 +186,7 @@ impl<S: SemaphoreState + core::fmt::Debug> core::fmt::Debug for Semaphore<S> {
     }
 }
 
-impl<S: SemaphoreState> Semaphore<S> {
+impl<S: SemaphoreState> Semaphore<S, Uncloseable> {
     /// Create a new first-in-first-out semaphore with the given initial state.
     pub fn new_fifo(state: S) -> Self {
         Self::new_inner(state, FairOrder::Fifo)
@@ -196,13 +196,27 @@ impl<S: SemaphoreState> Semaphore<S> {
     pub fn new_lifo(state: S) -> Self {
         Self::new_inner(state, FairOrder::Lifo)
     }
+}
 
+impl<S: SemaphoreState> Semaphore<S, Closeable> {
+    /// Create a new first-in-first-out semaphore with the given initial state.
+    pub fn new_closeable_fifo(state: S) -> Self {
+        Self::new_inner(state, FairOrder::Fifo)
+    }
+
+    /// Create a new last-in-first-out semaphore with the given initial state.
+    pub fn new_closeable_lifo(state: S) -> Self {
+        Self::new_inner(state, FairOrder::Lifo)
+    }
+}
+
+impl<S: SemaphoreState, C: IsCloseable> Semaphore<S, C> {
     fn new_inner(state: S, order: FairOrder) -> Self {
         let state = QueueState {
             state,
             // Safety: during acquire, we ensure that nodes in this queue
             // will never attempt to use a different queue to read the nodes.
-            queue: Some(PinList::new(unsafe { pin_list::id::DebugChecked::new() })),
+            queue: Ok(PinList::new(unsafe { pin_list::id::DebugChecked::new() })),
         };
         Self {
             state: Mutex::new(state),
@@ -211,7 +225,7 @@ impl<S: SemaphoreState> Semaphore<S> {
     }
 }
 
-impl<S: SemaphoreState + ?Sized> Semaphore<S> {
+impl<S: SemaphoreState + ?Sized, C: IsCloseable> Semaphore<S, C> {
     /// Access the state with mutable access.
     ///
     /// This gives direct access to the state, be careful not to
@@ -224,13 +238,15 @@ impl<S: SemaphoreState + ?Sized> Semaphore<S> {
         state.check();
         res
     }
+}
 
+impl<S: SemaphoreState + ?Sized> Semaphore<S, Closeable> {
     /// Close the semaphore.
     ///
     /// All tasks currently waiting to acquire a token will immediately stop.
     /// No new acquire attempts will succeed.
     pub fn close(&self) {
-        let Some(mut queue) = self.state.lock().queue.take() else {
+        let Ok(mut queue) = core::mem::replace(&mut self.state.lock().queue, Err(())) else {
             return;
         };
 
@@ -247,33 +263,78 @@ impl<S: SemaphoreState + ?Sized> Semaphore<S> {
         }
         debug_assert!(queue.is_empty());
     }
+
+    /// Check if the semaphore is closed
+    pub fn is_closed(&self) -> bool {
+        self.state.lock().queue.is_err()
+    }
 }
+
+mod private {
+    pub trait Sealed {
+        type Closed<P>;
+        fn from_closed<P>(c: &Self::Closed<()>, p: P) -> Self::Closed<P>;
+        fn map<P, R>(p: Self::Closed<P>, f: impl FnOnce(P) -> R) -> Self::Closed<R>;
+    }
+}
+
+pub trait IsCloseable: private::Sealed {}
+
+#[non_exhaustive]
+pub struct Closeable;
+
+#[non_exhaustive]
+pub struct Uncloseable;
+
+impl private::Sealed for Closeable {
+    type Closed<P> = P;
+    fn from_closed<P>(c: &Self::Closed<()>, p: P) -> Self::Closed<P> {
+        let () = c;
+        p
+    }
+    fn map<P, R>(p: Self::Closed<P>, f: impl FnOnce(P) -> R) -> Self::Closed<R> {
+        f(p)
+    }
+}
+impl private::Sealed for Uncloseable {
+    type Closed<P> = Infallible;
+    fn from_closed<P>(c: &Self::Closed<()>, _p: P) -> Self::Closed<P> {
+        match *c {}
+    }
+    fn map<P, R>(p: Self::Closed<P>, _f: impl FnOnce(P) -> R) -> Self::Closed<R> {
+        match p {}
+    }
+}
+impl IsCloseable for Closeable {}
+impl IsCloseable for Uncloseable {}
 
 // don't question the weird bounds here...
 struct QueueState<
     S: SemaphoreState<Params = Params, Permit = Permit> + ?Sized,
+    C: IsCloseable,
     Params = <S as SemaphoreState>::Params,
     Permit = <S as SemaphoreState>::Permit,
 > {
-    queue: Option<PinList<PinQueue<Params, Permit>>>,
+    #[allow(clippy::type_complexity)]
+    queue: Result<PinList<PinQueue<Params, Permit, C>>, C::Closed<()>>,
     state: S,
 }
 
-type PinQueue<Params, Permit> = dyn pin_list::Types<
+type PinQueue<Params, Permit, C> = dyn pin_list::Types<
         Id = pin_list::id::DebugChecked,
         // Some(params), waker -> Pending
         // None, waker -> Invalid state.
         Protected = (Option<Params>, Waker),
         // Ok(permit) -> Ready
         // Err(params) -> Closed
-        Removed = Result<Permit, Params>,
+        Removed = Result<Permit, <C as private::Sealed>::Closed<Params>>,
         Unprotected = (),
     >;
 
-impl<S: SemaphoreState + ?Sized> QueueState<S> {
+impl<S: SemaphoreState + ?Sized, C: IsCloseable> QueueState<S, C> {
     #[inline]
     fn check(&mut self) {
-        let Some(queue) = &mut self.queue else { return };
+        let Ok(queue) = &mut self.queue else { return };
         let mut leader = queue.cursor_front_mut();
         while let Some(p) = leader.protected_mut() {
             let params =
@@ -296,13 +357,13 @@ impl<S: SemaphoreState + ?Sized> QueueState<S> {
 
 /// The drop-guard for semaphore permits.
 /// Will ensure the permit is released when dropped.
-pub struct Permit<'a, S: SemaphoreState + ?Sized> {
-    sem: &'a Semaphore<S>,
+pub struct Permit<'a, S: SemaphoreState + ?Sized, C: IsCloseable = Uncloseable> {
+    sem: &'a Semaphore<S, C>,
     // this is never dropped because it's returned to the semaphore on drop
     permit: ManuallyDrop<S::Permit>,
 }
 
-impl<S: SemaphoreState + ?Sized> core::fmt::Debug for Permit<'_, S>
+impl<S: SemaphoreState + ?Sized, C: IsCloseable> core::fmt::Debug for Permit<'_, S, C>
 where
     S::Permit: core::fmt::Debug,
 {
@@ -313,11 +374,11 @@ where
     }
 }
 
-impl<'a, S: SemaphoreState + ?Sized> Permit<'a, S> {
+impl<'a, S: SemaphoreState + ?Sized, C: IsCloseable> Permit<'a, S, C> {
     /// Construct a new permit out of thin air, no waiting is required.
     ///
     /// This violates the purpose of the semahpore, but is provided for convenience.
-    pub fn out_of_thin_air(sem: &'a Semaphore<S>, permit: S::Permit) -> Self {
+    pub fn out_of_thin_air(sem: &'a Semaphore<S, C>, permit: S::Permit) -> Self {
         Self {
             sem,
             permit: ManuallyDrop::new(permit),
@@ -338,7 +399,7 @@ impl<'a, S: SemaphoreState + ?Sized> Permit<'a, S> {
     }
 
     /// Get read access to the associated semaphore
-    pub fn semaphore(&self) -> &'a Semaphore<S> {
+    pub fn semaphore(&self) -> &'a Semaphore<S, C> {
         self.sem
     }
 
@@ -349,7 +410,7 @@ impl<'a, S: SemaphoreState + ?Sized> Permit<'a, S> {
     }
 }
 
-impl<S: SemaphoreState + ?Sized> Drop for Permit<'_, S> {
+impl<S: SemaphoreState + ?Sized, C: IsCloseable> Drop for Permit<'_, S, C> {
     fn drop(&mut self) {
         // Safety: only taken on drop.
         let permit = unsafe { ManuallyDrop::take(&mut self.permit) };

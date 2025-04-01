@@ -95,7 +95,7 @@ async fn check() {
 
     assert_eq!(sem.with_state(|s| s.available()), 10);
 
-    let permit1 = sem.acquire(()).await;
+    let permit1 = sem.acquire(()).await.unwrap_or_else(|x| match x {});
     assert_eq!(sem.with_state(|s| s.available()), 9);
 
     sem.with_state(|s| s.failure());
@@ -107,8 +107,8 @@ async fn check() {
     sem.with_state(|s| s.failure());
     assert_eq!(sem.with_state(|s| s.available()), 2);
 
-    let _permit2 = sem.acquire(()).await;
-    let _permit3 = sem.acquire(()).await;
+    let _permit2 = sem.acquire(()).await.unwrap_or_else(|x| match x {});
+    let _permit3 = sem.acquire(()).await.unwrap_or_else(|x| match x {});
     assert_eq!(sem.with_state(|s| s.available()), 0);
 
     tokio::time::timeout(Duration::from_millis(100), sem.acquire(()))
