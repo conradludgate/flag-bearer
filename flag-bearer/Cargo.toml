@@ -9,6 +9,7 @@ repository = "https://github.com/conradludgate/flag-bearer"
 [dependencies]
 parking_lot = { version = "0.12", default-features = false }
 pin-list = { version = "0.1", default-features = false }
+pin-project-lite = "0.2"
 
 [dev-dependencies]
 pollster = "0.4"

@@ -88,68 +88,44 @@ impl<S: SemaphoreState + ?Sized> Semaphore<S> {
     }
 }
 
-struct Acquire<'a, S: SemaphoreState + ?Sized> {
-    // #[pin]
-    node: Node<PinQueue<S::Params, S::Permit>>,
-    sem: &'a Semaphore<S>,
-    params: Option<S::Params>,
-}
-
-impl<S: SemaphoreState + ?Sized> Acquire<'_, S> {
-    fn pinned_drop(this: Pin<&mut Self>) {
-        let this = this.project();
-        let Some(node) = this.node.initialized_mut() else {
-            return;
-        };
-        let mut state = this.sem.state.lock();
-        if let Some(queue) = &mut state.queue {
-            let (data, _unprotected) = node.reset(queue);
-            if let NodeData::Removed(Ok(permit)) = data {
-                state.state.release(permit);
-            }
-            state.check();
-        } else {
-            let (permit, ()) = unsafe { node.take_removed_unchecked() };
-            if let Ok(permit) = permit {
-                state.state.release(permit);
-            }
-        };
-    }
-}
-
-const _: () = {
-    struct Projection<'__pin, 'a, S: SemaphoreState + ?Sized>
+pin_project_lite::pin_project! {
+    struct Acquire<'a, S>
     where
-        Acquire<'a, S>: '__pin,
+        S: ?Sized,
+        S: SemaphoreState,
     {
-        sem: &'__pin mut &'a Semaphore<S>,
-        node: Pin<&'__pin mut Node<PinQueue<S::Params, S::Permit>>>,
-        params: &'__pin mut Option<S::Params>,
+        #[pin]
+        node: Node<PinQueue<S::Params, S::Permit>>,
+        sem: &'a Semaphore<S>,
+        params: Option<S::Params>,
     }
 
-    impl<'a, S: SemaphoreState + ?Sized> Acquire<'a, S> {
-        fn project<'__pin>(self: Pin<&'__pin mut Self>) -> Projection<'__pin, 'a, S> {
-            // Safety: This is manual pin-projection. We only need `node` to be `Pin`ned.
-            unsafe {
-                let Self { sem, node, params } = self.get_unchecked_mut();
-                Projection {
-                    node: Pin::new_unchecked(node),
-                    sem,
-                    params,
+    impl<S> PinnedDrop for Acquire<'_, S>
+    where
+        S: ?Sized,
+        S: SemaphoreState,
+    {
+        fn drop(this: Pin<&mut Self>) {
+            let this = this.project();
+            let Some(node) = this.node.initialized_mut() else {
+                return;
+            };
+            let mut state = this.sem.state.lock();
+            if let Some(queue) = &mut state.queue {
+                let (data, _unprotected) = node.reset(queue);
+                if let NodeData::Removed(Ok(permit)) = data {
+                    state.state.release(permit);
                 }
-            }
+                state.check();
+            } else {
+                let (permit, ()) = unsafe { node.take_removed_unchecked() };
+                if let Ok(permit) = permit {
+                    state.state.release(permit);
+                }
+            };
         }
     }
-
-    impl<S: SemaphoreState + ?Sized> Drop for Acquire<'_, S> {
-        fn drop(&mut self) {
-            // Safety: the value cannot move after the drop phase
-            // and we are by definition dropping the value before releasing the memory.
-            let pinned_self: Pin<&mut Self> = unsafe { Pin::new_unchecked(self) };
-            Self::pinned_drop(pinned_self);
-        }
-    }
-};
+}
 
 impl<S: SemaphoreState + ?Sized> Future for Acquire<'_, S> {
     type Output = Result<S::Permit, S::Params>;
