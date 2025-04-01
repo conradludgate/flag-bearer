@@ -123,6 +123,9 @@ pin_project_lite::pin_project! {
                     state.check();
                 }
                 Err(_closed) => {
+                    // Safety: If the semaphore is closed (meaning we have no queue)
+                    // then there's no way this node could be queued in the queue,
+                    // therefore it must be removed.
                     let (permit, ()) = unsafe { node.take_removed_unchecked() };
                     if let Ok(permit) = permit {
                         state.state.release(permit);
