@@ -77,6 +77,12 @@
 //! ```
 
 #![no_std]
+#![warn(
+    unsafe_op_in_unsafe_fn,
+    clippy::missing_safety_doc,
+    clippy::multiple_unsafe_ops_per_block,
+    clippy::undocumented_unsafe_blocks
+)]
 
 use core::{hint::unreachable_unchecked, mem::ManuallyDrop, task::Waker};
 
@@ -345,6 +351,8 @@ impl<'a, S: SemaphoreState + ?Sized> Permit<'a, S> {
     /// Do not release the permit to the semaphore.
     pub fn take(self) -> S::Permit {
         let mut this = ManuallyDrop::new(self);
+        // Safety: We will not touch this.permit ever again,
+        // helped by the `ManuallyDrop` above preventing `Permit::drop` from running.
         unsafe { ManuallyDrop::take(&mut this.permit) }
     }
 }
