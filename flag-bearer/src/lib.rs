@@ -87,7 +87,7 @@
     clippy::undocumented_unsafe_blocks
 )]
 
-use core::{hint::unreachable_unchecked, mem::ManuallyDrop, task::Waker};
+use core::{hint::unreachable_unchecked, task::Waker};
 
 #[cfg(test)]
 extern crate std;
@@ -121,6 +121,9 @@ use pin_list::PinList;
 
 mod acquire;
 pub use acquire::{AcquireError, TryAcquireError};
+
+mod drop_wrapper;
+use drop_wrapper::DropWrapper;
 
 /// The trait defining how [`Semaphore`]s behave.
 pub trait SemaphoreState {
@@ -294,6 +297,9 @@ impl<S: SemaphoreState<Closeable = Closeable> + ?Sized> Semaphore<S> {
 
         debug_assert!(queue.is_empty());
 
+        // It's important that we only mark the queue as closed when we have ensured that
+        // all linked nodes are removed.
+        // If we did this early, we could panic and not dequeue every node.
         state.queue = Err(());
     }
 }
@@ -399,9 +405,19 @@ impl<S: SemaphoreState + ?Sized> QueueState<S> {
 /// The drop-guard for semaphore permits.
 /// Will ensure the permit is released when dropped.
 pub struct Permit<'a, S: SemaphoreState + ?Sized> {
+    inner: DropWrapper<SemWrapper<'a, S>>,
+}
+
+struct SemWrapper<'a, S: SemaphoreState + ?Sized> {
     sem: &'a Semaphore<S>,
-    // this is never dropped because it's returned to the semaphore on drop
-    permit: ManuallyDrop<S::Permit>,
+}
+
+impl<S: SemaphoreState + ?Sized> drop_wrapper::Drop2 for SemWrapper<'_, S> {
+    type T = S::Permit;
+
+    fn drop(&mut self, permit: Self::T) {
+        self.sem.with_state(|s| s.release(permit));
+    }
 }
 
 impl<S: SemaphoreState + ?Sized> core::fmt::Debug for Permit<'_, S>
@@ -410,7 +426,7 @@ where
 {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         f.debug_struct("Permit")
-            .field("permit", &self.permit)
+            .field("permit", &self.inner.t)
             .finish_non_exhaustive()
     }
 }
@@ -421,14 +437,13 @@ impl<'a, S: SemaphoreState + ?Sized> Permit<'a, S> {
     /// This violates the purpose of the semahpore, but is provided for convenience.
     pub fn out_of_thin_air(sem: &'a Semaphore<S>, permit: S::Permit) -> Self {
         Self {
-            sem,
-            permit: ManuallyDrop::new(permit),
+            inner: DropWrapper::new(SemWrapper { sem }, permit),
         }
     }
 
     /// Get read access to the permit value
     pub fn permit(&self) -> &S::Permit {
-        &self.permit
+        &self.inner.t
     }
 
     /// Get mut access to the permit value
@@ -436,28 +451,17 @@ impl<'a, S: SemaphoreState + ?Sized> Permit<'a, S> {
     /// It is up to the caller to maintain any semaphore invariants
     /// that might be violated when returning this permit.
     pub fn permit_mut(&mut self) -> &mut S::Permit {
-        &mut self.permit
+        &mut self.inner.t
     }
 
     /// Get read access to the associated semaphore
     pub fn semaphore(&self) -> &'a Semaphore<S> {
-        self.sem
+        self.inner.s.sem
     }
 
     /// Do not release the permit to the semaphore.
     pub fn take(self) -> S::Permit {
-        let mut this = ManuallyDrop::new(self);
-        // Safety: We will not touch this.permit ever again,
-        // helped by the `ManuallyDrop` above preventing `Permit::drop` from running.
-        unsafe { ManuallyDrop::take(&mut this.permit) }
-    }
-}
-
-impl<S: SemaphoreState + ?Sized> Drop for Permit<'_, S> {
-    fn drop(&mut self) {
-        // Safety: only taken on drop.
-        let permit = unsafe { ManuallyDrop::take(&mut self.permit) };
-        self.sem.with_state(|s| s.release(permit));
+        self.inner.take()
     }
 }
 
