@@ -29,6 +29,13 @@ fn main() {
     });
     print_results(h);
 
+    println!("flag_bearer[threads = 2, permits = 64]:");
+    let semaphore = semaphore::Semaphore::new(64);
+    let h = bench(2, rounds, iters, &semaphore, async |s| {
+        black_box(s.acquire().await);
+    });
+    print_results(h);
+
     println!("tokio[threads = {t}, permits = {slow}]:");
     let semaphore = tokio::sync::Semaphore::new(slow);
     let h = bench(t, rounds, iters, &semaphore, async |s| {
@@ -39,6 +46,13 @@ fn main() {
     println!("tokio[threads = {t}, permits = {fast}]:");
     let semaphore = tokio::sync::Semaphore::new(fast);
     let h = bench(t, rounds, iters, &semaphore, async |s| {
+        drop(black_box(s.acquire().await.unwrap()));
+    });
+    print_results(h);
+
+    println!("tokio[threads = 2, permits = 64]:");
+    let semaphore = tokio::sync::Semaphore::new(64);
+    let h = bench(2, rounds, iters, &semaphore, async |s| {
         drop(black_box(s.acquire().await.unwrap()));
     });
     print_results(h);
