@@ -308,9 +308,10 @@ mod private {
     pub trait IsCloseable {
         const CLOSE: bool;
         type Closed<P>;
+
         fn map_ref<P, R>(p: &Self::Closed<P>, f: impl FnOnce(&P) -> R) -> Self::Closed<R>;
         fn map<P, R>(p: Self::Closed<P>, f: impl FnOnce(P) -> R) -> Self::Closed<R>;
-        fn into_inner<P>(p: Self::Closed<P>) -> P;
+        fn into_inner_ref<P>(p: &Self::Closed<P>) -> &P;
     }
 }
 
@@ -329,7 +330,7 @@ impl private::IsCloseable for Closeable {
     fn map<P, R>(p: Self::Closed<P>, f: impl FnOnce(P) -> R) -> Self::Closed<R> {
         f(p)
     }
-    fn into_inner<P>(p: Self::Closed<P>) -> P {
+    fn into_inner_ref<P>(p: &Self::Closed<P>) -> &P {
         p
     }
 }
@@ -342,8 +343,8 @@ impl private::IsCloseable for Uncloseable {
     fn map<P, R>(p: Self::Closed<P>, _f: impl FnOnce(P) -> R) -> Self::Closed<R> {
         match p {}
     }
-    fn into_inner<P>(p: Self::Closed<P>) -> P {
-        match p {}
+    fn into_inner_ref<P>(p: &Self::Closed<P>) -> &P {
+        match *p {}
     }
 }
 
