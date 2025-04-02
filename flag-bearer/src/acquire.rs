@@ -229,8 +229,9 @@ impl<S: SemaphoreState + ?Sized> QueueState<S> {
         let queue = match &mut self.queue {
             Ok(queue) => queue,
             Err(closed) => {
-                return Err(TryAcquireError::Closed(S::Closeable::from_closed(
-                    closed, params,
+                return Err(TryAcquireError::Closed(S::Closeable::map_ref(
+                    closed,
+                    |()| params,
                 )));
             }
         };
@@ -271,10 +272,20 @@ impl<P, C: IsCloseable> fmt::Display for TryAcquireError<P, C> {
 
 /// The error returned by [`acquire`](Semaphore::acquire) if the semaphore was closed.
 #[non_exhaustive]
-#[derive(Debug, PartialEq, Eq)]
+#[derive(PartialEq, Eq)]
 pub struct AcquireError<P, C: IsCloseable> {
     /// The params that was used in the acquire request
     pub params: C::Closed<P>,
+}
+
+impl<P: fmt::Debug, C: IsCloseable> fmt::Debug for AcquireError<P, C> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        C::into_inner(C::map_ref(&self.params, |params| {
+            f.debug_struct("AcquireError")
+                .field("params", params)
+                .finish()
+        }))
+    }
 }
 
 impl<P> AcquireError<P, Uncloseable> {
