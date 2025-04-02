@@ -18,14 +18,14 @@ fn main() {
     println!("flag_bearer[threads = {t}, permits = {slow}]:");
     let semaphore = semaphore::Semaphore::new(slow);
     let h = bench(t, rounds, iters, &semaphore, async |s| {
-        black_box(s.acquire().await.unwrap());
+        black_box(s.acquire().await);
     });
     print_results(h);
 
     println!("flag_bearer[threads = {t}, permits = {fast}]:");
     let semaphore = semaphore::Semaphore::new(fast);
     let h = bench(t, rounds, iters, &semaphore, async |s| {
-        black_box(s.acquire().await.unwrap());
+        black_box(s.acquire().await);
     });
     print_results(h);
 
@@ -45,7 +45,7 @@ fn main() {
 }
 
 fn print_results(h: Histogram<u64>) {
-    for q in [0.5, 0.75, 0.9, 0.99, 1.0] {
+    for q in [0.5, 0.75, 0.9, 0.99, 0.999] {
         println!(
             "\t{}'th percentile of data is {:?}",
             q * 100.0,
@@ -114,6 +114,8 @@ mod semaphore {
         /// Number of permits that have been acquired
         type Permit = usize;
 
+        type Closeable = flag_bearer::Uncloseable;
+
         fn acquire(&mut self, params: Self::Params) -> Result<Self::Permit, Self::Params> {
             if params <= self.0 {
                 self.0 -= params;
@@ -137,8 +139,8 @@ mod semaphore {
             Self(flag_bearer::Semaphore::new_fifo(SemaphoreCounter(count)))
         }
 
-        pub async fn acquire(&self) -> Option<Permit<'_>> {
-            Some(Permit(self.0.acquire(1).await.ok()?))
+        pub async fn acquire(&self) -> Permit<'_> {
+            Permit(self.0.acquire(1).await.unwrap_or_else(|x| x.never()))
         }
     }
 }

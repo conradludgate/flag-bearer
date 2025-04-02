@@ -29,7 +29,7 @@ fn main() {
 }
 
 fn print_results(h: Histogram<u64>) {
-    for q in [0.5, 0.75, 0.9, 0.99, 1.0] {
+    for q in [0.5, 0.75, 0.9, 0.99, 0.999] {
         println!(
             "\t{}'th percentile of data is {:?}",
             q * 100.0,
@@ -97,6 +97,8 @@ mod semaphore {
 
         /// Number of permits that have been acquired
         type Permit = usize;
+
+        type Closeable = flag_bearer::Uncloseable;
 
         fn acquire(&mut self, params: Self::Params) -> Result<Self::Permit, Self::Params> {
             if params <= self.0 {

@@ -1,6 +1,6 @@
 use std::sync::Arc;
 
-use flag_bearer::{Semaphore, SemaphoreState};
+use flag_bearer::{Semaphore, SemaphoreState, Uncloseable};
 
 #[derive(Debug)]
 struct Dummy;
@@ -8,6 +8,7 @@ struct Dummy;
 impl SemaphoreState for Dummy {
     type Params = ();
     type Permit = ();
+    type Closeable = Uncloseable;
 
     fn acquire(&mut self, _params: Self::Params) -> Result<Self::Permit, Self::Params> {
         Ok(())
@@ -22,6 +23,7 @@ struct Counter(u64);
 impl SemaphoreState for Counter {
     type Params = ();
     type Permit = ();
+    type Closeable = Uncloseable;
 
     fn acquire(&mut self, p: Self::Params) -> Result<Self::Permit, Self::Params> {
         let Some(n) = self.0.checked_sub(1) else {
@@ -38,12 +40,12 @@ impl SemaphoreState for Counter {
 
 #[tokio::test]
 async fn trait_object() {
-    let s1: Arc<Semaphore<dyn SemaphoreState<Params = (), Permit = ()>>> =
+    let s1: Arc<Semaphore<dyn SemaphoreState<Params = (), Permit = (), Closeable = Uncloseable>>> =
         Arc::new(Semaphore::new_fifo(Dummy));
 
-    let s2: Arc<Semaphore<dyn SemaphoreState<Params = (), Permit = ()>>> =
+    let s2: Arc<Semaphore<dyn SemaphoreState<Params = (), Permit = (), Closeable = Uncloseable>>> =
         Arc::new(Semaphore::new_fifo(Counter(1)));
 
-    let _p1 = s1.acquire(()).await.unwrap();
-    let _p2 = s2.acquire(()).await.unwrap();
+    let _p1 = s1.acquire(()).await.unwrap_or_else(|x| x.never());
+    let _p2 = s2.acquire(()).await.unwrap_or_else(|x| x.never());
 }

@@ -15,6 +15,8 @@ mod semaphore {
         /// Number of permits that have been acquired
         type Permit = usize;
 
+        type Closeable = flag_bearer::Uncloseable;
+
         fn acquire(&mut self, params: Self::Params) -> Result<Self::Permit, Self::Params> {
             if params <= self.0 {
                 self.0 -= params;
@@ -46,11 +48,15 @@ mod semaphore {
         }
 
         pub async fn acquire(&self) -> Option<Permit<'_>> {
-            Some(Permit(self.0.acquire(1).await.ok()?))
+            Some(Permit(
+                self.0.acquire(1).await.unwrap_or_else(|x| x.never()),
+            ))
         }
 
         pub async fn acquire_many(&self, n: usize) -> Option<Permit<'_>> {
-            Some(Permit(self.0.acquire(n).await.ok()?))
+            Some(Permit(
+                self.0.acquire(n).await.unwrap_or_else(|x| x.never()),
+            ))
         }
 
         pub fn try_acquire(&self) -> Result<Permit<'_>, TryAcquireError> {
