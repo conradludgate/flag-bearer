@@ -140,7 +140,7 @@ mod semaphore {
         }
 
         pub async fn acquire(&self) -> Permit<'_> {
-            Permit(self.0.acquire(1).await.unwrap_or_else(|x| match x {}))
+            Permit(self.0.acquire(1).await.unwrap_or_else(|x| x.never()))
         }
     }
 }

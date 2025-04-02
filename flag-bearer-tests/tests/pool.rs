@@ -30,17 +30,17 @@ async fn pool() {
         s.objects.push(Conn(1));
     });
 
-    let mut conn1 = pool.acquire(()).await.unwrap_or_else(|x| match x {});
+    let mut conn1 = pool.acquire(()).await.unwrap_or_else(|x| x.never());
     assert_eq!(conn1.permit().0, 1);
     conn1.permit_mut().0 = 11;
 
-    let mut conn0 = pool.acquire(()).await.unwrap_or_else(|x| match x {});
+    let mut conn0 = pool.acquire(()).await.unwrap_or_else(|x| x.never());
     assert_eq!(conn0.permit().0, 0);
     conn0.permit_mut().0 = 10;
 
     drop(conn1);
     drop(conn0);
 
-    let conn0 = pool.acquire(()).await.unwrap_or_else(|x| match x {});
+    let conn0 = pool.acquire(()).await.unwrap_or_else(|x| x.never());
     assert_eq!(conn0.permit().0, 10);
 }

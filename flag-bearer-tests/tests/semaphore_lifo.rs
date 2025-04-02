@@ -49,13 +49,13 @@ mod semaphore {
 
         pub async fn acquire(&self) -> Option<Permit<'_>> {
             Some(Permit(
-                self.0.acquire(1).await.unwrap_or_else(|x| match x {}),
+                self.0.acquire(1).await.unwrap_or_else(|x| x.never()),
             ))
         }
 
         pub async fn acquire_many(&self, n: usize) -> Option<Permit<'_>> {
             Some(Permit(
-                self.0.acquire(n).await.unwrap_or_else(|x| match x {}),
+                self.0.acquire(n).await.unwrap_or_else(|x| x.never()),
             ))
         }
 
