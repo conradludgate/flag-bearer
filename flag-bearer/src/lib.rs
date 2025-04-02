@@ -96,7 +96,7 @@ use parking_lot::Mutex;
 use pin_list::PinList;
 
 mod acquire;
-pub use acquire::TryAcquireError;
+pub use acquire::{AcquireError, TryAcquireError};
 
 /// The trait defining how [`Semaphore`]s behave.
 pub trait SemaphoreState {
