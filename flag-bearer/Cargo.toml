@@ -13,3 +13,9 @@ pin-project-lite = "0.2"
 
 [dev-dependencies]
 pollster = "0.4"
+
+[target.'cfg(loom)'.dev-dependencies]
+loom = { version = "0.7.2", features = ["futures"] }
+
+[lints.rust]
+unexpected_cfgs = { level = "allow", check-cfg = ['cfg(loom)'] }

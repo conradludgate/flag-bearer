@@ -92,7 +92,31 @@ use core::{hint::unreachable_unchecked, mem::ManuallyDrop, task::Waker};
 #[cfg(test)]
 extern crate std;
 
+#[cfg(all(test, loom))]
+mod shim {
+    pub struct Mutex<T: ?Sized>(loom::sync::Mutex<T>);
+    impl<T> Mutex<T> {
+        pub fn new(t: T) -> Self {
+            Self(loom::sync::Mutex::new(t))
+        }
+    }
+
+    impl<T: ?Sized> Mutex<T> {
+        pub fn lock(&self) -> loom::sync::MutexGuard<'_, T> {
+            self.0.lock().unwrap_or_else(|g| g.into_inner())
+        }
+        pub fn try_lock(&self) -> Option<loom::sync::MutexGuard<'_, T>> {
+            self.0.try_lock().ok()
+        }
+    }
+}
+
+#[cfg(all(test, loom))]
+pub use shim::Mutex;
+
+#[cfg(not(all(test, loom)))]
 use parking_lot::Mutex;
+
 use pin_list::PinList;
 
 mod acquire;
@@ -251,22 +275,26 @@ impl<S: SemaphoreState<Closeable = Closeable> + ?Sized> Semaphore<S> {
     /// All tasks currently waiting to acquire a token will immediately stop.
     /// No new acquire attempts will succeed.
     pub fn close(&self) {
-        let Ok(mut queue) = core::mem::replace(&mut self.state.lock().queue, Err(())) else {
+        // must hold lock while we drain the queue
+        let mut state = self.state.lock();
+
+        let Ok(queue) = &mut state.queue else {
             return;
         };
 
         let mut cursor = queue.cursor_front_mut();
-        while let Some(p) = cursor.protected_mut() {
-            let params =
-                p.0.take()
-                    .expect("params should be in place. possibly the acquire method panicked");
-            match cursor.remove_current(Err(params)) {
-                Ok((_, waker)) => waker.wake(),
-                // Safety: with protected_mut, we have just made sure it is in the list
-                Err(_) => unsafe { unreachable_unchecked() },
-            }
-        }
+        while cursor.remove_current_with_or(
+            |(params, waker)| {
+                waker.wake();
+
+                Err(params)
+            },
+            || Err(None),
+        ) {}
+
         debug_assert!(queue.is_empty());
+
+        state.queue = Err(());
     }
 }
 
@@ -338,8 +366,9 @@ type PinQueue<Params, Permit, C> = dyn pin_list::Types<
         // None, waker -> Invalid state.
         Protected = (Option<Params>, Waker),
         // Ok(permit) -> Ready
-        // Err(params) -> Closed
-        Removed = Result<Permit, <C as private::IsCloseable>::Closed<Params>>,
+        // Err(Some(params)) -> Closed
+        // Err(None) -> Closed, Invalid state
+        Removed = Result<Permit, <C as private::IsCloseable>::Closed<Option<Params>>>,
         Unprotected = (),
     >;
 
@@ -349,9 +378,9 @@ impl<S: SemaphoreState + ?Sized> QueueState<S> {
         let Ok(queue) = &mut self.queue else { return };
         let mut leader = queue.cursor_front_mut();
         while let Some(p) = leader.protected_mut() {
-            let params =
-                p.0.take()
-                    .expect("params should be in place. possibly the acquire method panicked");
+            let params = p.0.take().expect(
+                "params should be in place. possibly the SemaphoreState::acquire method panicked",
+            );
             match self.state.acquire(params) {
                 Ok(permit) => match leader.remove_current(Ok(permit)) {
                     Ok((_, waker)) => waker.wake(),
@@ -482,5 +511,38 @@ mod test {
         assert!(!s.is_closed());
         s.close();
         assert!(s.is_closed());
+    }
+
+    #[derive(Debug)]
+    struct NeverSucceeds;
+
+    impl crate::SemaphoreState for NeverSucceeds {
+        type Params = ();
+        type Permit = ();
+        type Closeable = Closeable;
+
+        fn acquire(&mut self, _params: Self::Params) -> Result<Self::Permit, Self::Params> {
+            Err(())
+        }
+
+        fn release(&mut self, _permit: Self::Permit) {}
+    }
+
+    #[cfg(loom)]
+    #[test]
+    fn concurrent_closed() {
+        loom::model(|| {
+            use std::sync::Arc;
+            let s = Arc::new(crate::Semaphore::new_fifo(NeverSucceeds));
+
+            let s2 = s.clone();
+            let handle = loom::thread::spawn(move || {
+                loom::future::block_on(async move { s2.acquire(()).await.unwrap_err() })
+            });
+
+            s.close();
+
+            handle.join().unwrap();
+        });
     }
 }

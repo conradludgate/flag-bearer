@@ -174,6 +174,13 @@ impl<S: SemaphoreState + ?Sized> Future for Acquire<'_, S> {
             Err(_closed) => {
                 // Safety: If there is no queue, then we are guaranteed to be removed from it
                 let (permit, ()) = unsafe { init.take_removed_unchecked() };
+                let permit = permit.map_err(|params| {
+                    S::Closeable::map(params, |params| {
+                        params.expect(
+                            "params should be set. likely the SemaphoreState::acquire method panicked",
+                        )
+                    })
+                });
                 return Poll::Ready(permit);
             }
         };
@@ -187,6 +194,13 @@ impl<S: SemaphoreState + ?Sized> Future for Acquire<'_, S> {
             None => {
                 // Safety: we have just verified that it is removed;
                 let (permit, ()) = unsafe { init.take_removed_unchecked() };
+                let permit = permit.map_err(|params| {
+                    S::Closeable::map(params, |params| {
+                        params.expect(
+                            "params should be set. likely the SemaphoreState::acquire method panicked",
+                        )
+                    })
+                });
                 Poll::Ready(permit)
             }
         }
