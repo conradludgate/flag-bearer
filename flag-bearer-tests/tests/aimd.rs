@@ -1,6 +1,6 @@
 use std::time::Duration;
 
-use flag_bearer::{Semaphore, SemaphoreState};
+use flag_bearer::{SemaphoreBuilder, SemaphoreState};
 
 #[derive(Debug)]
 pub struct Aimd {
@@ -65,7 +65,6 @@ impl AimdState {
 impl SemaphoreState for AimdState {
     type Params = ();
     type Permit = ();
-    type Closeable = flag_bearer::Uncloseable;
 
     fn acquire(&mut self, _: ()) -> Result<(), ()> {
         if self.acquired < self.state.limit {
@@ -89,7 +88,7 @@ async fn check() {
         inc: 1,
         dec: 0.5,
     };
-    let sem = Semaphore::new_fifo(AimdState {
+    let sem = SemaphoreBuilder::fifo().with_state(AimdState {
         acquired: 0,
         state: Aimd::new(config),
     });

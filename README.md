@@ -44,7 +44,7 @@ impl SemaphoreState for SemaphoreCounter {
     }
 }
 
-let semaphore = Semaphore::new_fifo(SemaphoreCounter {
+let semaphore = SemaphoreBuilder::fifo().with_state(SemaphoreCounter {
     bytes: 10 * 1024 * 1024, // 10 MiB.
     requests: 10, // 10 requests.
 })

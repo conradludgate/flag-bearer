@@ -1,4 +1,4 @@
-use flag_bearer::{Semaphore, SemaphoreState};
+use flag_bearer::{SemaphoreBuilder, SemaphoreState};
 
 struct Conn(usize);
 
@@ -10,7 +10,6 @@ struct Pool {
 impl SemaphoreState for Pool {
     type Params = ();
     type Permit = Conn;
-    type Closeable = flag_bearer::Uncloseable;
 
     fn acquire(&mut self, params: Self::Params) -> Result<Self::Permit, Self::Params> {
         self.objects.pop().ok_or(params)
@@ -23,7 +22,7 @@ impl SemaphoreState for Pool {
 
 #[tokio::test]
 async fn pool() {
-    let pool = Semaphore::new_lifo(Pool::default());
+    let pool = SemaphoreBuilder::lifo().with_state(Pool::default());
 
     pool.with_state(|s| {
         s.objects.push(Conn(0));

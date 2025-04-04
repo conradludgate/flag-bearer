@@ -118,6 +118,8 @@ fn bench<S: Sync>(
 }
 
 mod semaphore {
+    use flag_bearer::Uncloseable;
+
     #[derive(Debug)]
     struct SemaphoreCounter(usize);
 
@@ -127,8 +129,6 @@ mod semaphore {
 
         /// Number of permits that have been acquired
         type Permit = usize;
-
-        type Closeable = flag_bearer::Uncloseable;
 
         fn acquire(&mut self, params: Self::Params) -> Result<Self::Permit, Self::Params> {
             if params <= self.0 {
@@ -146,11 +146,11 @@ mod semaphore {
 
     pub struct Semaphore(flag_bearer::Semaphore<SemaphoreCounter>);
     #[allow(dead_code)]
-    pub struct Permit<'a>(flag_bearer::Permit<'a, SemaphoreCounter>);
+    pub struct Permit<'a>(flag_bearer::Permit<'a, SemaphoreCounter, Uncloseable>);
 
     impl Semaphore {
         pub fn new(count: usize) -> Self {
-            Self(flag_bearer::Semaphore::new_fifo(SemaphoreCounter(count)))
+            Self(flag_bearer::SemaphoreBuilder::fifo().with_state(SemaphoreCounter(count)))
         }
 
         pub async fn acquire(&self) -> Permit<'_> {

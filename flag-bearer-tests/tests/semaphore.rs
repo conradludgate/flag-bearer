@@ -5,6 +5,8 @@ use std::{
 };
 
 mod semaphore {
+    use flag_bearer::Closeable;
+
     #[derive(Debug)]
     struct SemaphoreCounter(usize);
 
@@ -14,8 +16,6 @@ mod semaphore {
 
         /// Number of permits that have been acquired
         type Permit = usize;
-
-        type Closeable = flag_bearer::Closeable;
 
         fn acquire(&mut self, params: Self::Params) -> Result<Self::Permit, Self::Params> {
             if params <= self.0 {
@@ -31,8 +31,8 @@ mod semaphore {
         }
     }
 
-    pub struct Semaphore(flag_bearer::Semaphore<SemaphoreCounter>);
-    pub struct Permit<'a>(flag_bearer::Permit<'a, SemaphoreCounter>);
+    pub struct Semaphore(flag_bearer::Semaphore<SemaphoreCounter, Closeable>);
+    pub struct Permit<'a>(flag_bearer::Permit<'a, SemaphoreCounter, Closeable>);
 
     #[derive(Debug)]
     pub enum TryAcquireError {
@@ -44,7 +44,11 @@ mod semaphore {
         pub const MAX_PERMITS: usize = usize::MAX;
 
         pub fn new(count: usize) -> Self {
-            Self(flag_bearer::Semaphore::new_fifo(SemaphoreCounter(count)))
+            Self(
+                flag_bearer::SemaphoreBuilder::fifo()
+                    .closeable()
+                    .with_state(SemaphoreCounter(count)),
+            )
         }
 
         pub fn close(&self) {

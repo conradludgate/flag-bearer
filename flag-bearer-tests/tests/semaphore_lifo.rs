@@ -15,8 +15,6 @@ mod semaphore {
         /// Number of permits that have been acquired
         type Permit = usize;
 
-        type Closeable = flag_bearer::Uncloseable;
-
         fn acquire(&mut self, params: Self::Params) -> Result<Self::Permit, Self::Params> {
             if params <= self.0 {
                 self.0 -= params;
@@ -44,7 +42,7 @@ mod semaphore {
         pub const MAX_PERMITS: usize = usize::MAX;
 
         pub fn new(count: usize) -> Self {
-            Self(flag_bearer::Semaphore::new_lifo(SemaphoreCounter(count)))
+            Self(flag_bearer::SemaphoreBuilder::lifo().with_state(SemaphoreCounter(count)))
         }
 
         pub async fn acquire(&self) -> Option<Permit<'_>> {

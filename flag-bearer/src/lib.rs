@@ -46,9 +46,6 @@
 //!     /// Number of permits that have been acquired
 //!     type Permit = usize;
 //!
-//!     /// This semaphore can be closed
-//!     type Closeable = flag_bearer::Closeable;
-//!
 //!     fn acquire(&mut self, params: Self::Params) -> Result<Self::Permit, Self::Params> {
 //!         if let Some(available) = self.0.checked_sub(params) {
 //!             self.0 = available;
@@ -65,7 +62,7 @@
 //!
 //! # pollster::block_on(async {
 //! // create a new FIFO semaphore with 20 permits
-//! let semaphore = flag_bearer::Semaphore::new_fifo(SemaphoreCounter(20));
+//! let semaphore = flag_bearer::SemaphoreBuilder::fifo().closeable().with_state(SemaphoreCounter(20));
 //!
 //! // acquire a token
 //! let _permit = semaphore.acquire(1).await.expect("semaphore shouldn't be closed");
@@ -93,9 +90,6 @@
 //! impl flag_bearer::SemaphoreState for Utilisation {
 //!     type Params = ();
 //!     type Permit = ();
-//!
-//!     /// This semaphore cannot be closed
-//!     type Closeable = flag_bearer::Uncloseable;
 //!
 //!     fn acquire(&mut self, p: Self::Params) -> Result<Self::Permit, Self::Params> {
 //!         if self.taken < self.limit {
@@ -125,7 +119,7 @@
 //!
 //! # pollster::block_on(async {
 //! // create a new FIFO semaphore with 20 tokens
-//! let semaphore = flag_bearer::Semaphore::new_fifo(Utilisation::new(20));
+//! let semaphore = flag_bearer::SemaphoreBuilder::fifo().with_state(Utilisation::new(20));
 //!
 //! // acquire a permit
 //! let _permit = semaphore.must_acquire(()).await;
@@ -155,9 +149,6 @@
 //!     type Params = Request;
 //!     type Permit = Request;
 //!
-//!     /// This semaphore cannot be closed
-//!     type Closeable = flag_bearer::Uncloseable;
-//!
 //!     fn acquire(&mut self, p: Self::Params) -> Result<Self::Permit, Self::Params> {
 //!         if self.requests >= 1 && self.bytes >= p.bytes {
 //!             self.requests -= 1;
@@ -176,7 +167,7 @@
 //!
 //! # pollster::block_on(async {
 //! // create a new LIFO semaphore with support for 1 MB and 20 requests
-//! let semaphore = flag_bearer::Semaphore::new_lifo(Utilisation {
+//! let semaphore = flag_bearer::SemaphoreBuilder::lifo().with_state(Utilisation {
 //!     requests: 20,
 //!     bytes: 1024 * 1024,
 //! });
@@ -203,9 +194,6 @@
 //!     type Params = ();
 //!     type Permit = Connection;
 //!
-//!     /// This pool cannot be closed
-//!     type Closeable = flag_bearer::Uncloseable;
-//!
 //!     fn acquire(&mut self, p: Self::Params) -> Result<Self::Permit, Self::Params> {
 //!         self.conns.pop().ok_or(p)
 //!     }
@@ -217,7 +205,7 @@
 //!
 //! # pollster::block_on(async {
 //! // Create a new LIFO connection pool with 20 connections
-//! let semaphore = flag_bearer::Semaphore::new_lifo(Pool {
+//! let semaphore = flag_bearer::SemaphoreBuilder::lifo().with_state(Pool {
 //!     conns: std::iter::repeat_with(|| Connection {}).take(20).collect(),
 //! });
 //!
@@ -240,7 +228,7 @@
     clippy::undocumented_unsafe_blocks
 )]
 
-use core::{hint::unreachable_unchecked, task::Waker};
+use core::{hint::unreachable_unchecked, marker::PhantomData, task::Waker};
 
 #[cfg(test)]
 extern crate std;
@@ -265,7 +253,7 @@ mod shim {
 }
 
 #[cfg(all(test, loom))]
-pub use shim::Mutex;
+use shim::Mutex;
 
 #[cfg(not(all(test, loom)))]
 use parking_lot::Mutex;
@@ -292,11 +280,6 @@ pub trait SemaphoreState {
     /// of permits acquired. If this is more like a connection pool,
     /// this could be a specific object allocation.
     type Permit;
-
-    /// Whether this semaphore should be closeable or not.
-    ///
-    /// Can accept either [`Closeable`] or [`Uncloseable`].
-    type Closeable: private::IsCloseable;
 
     /// Acquire a permit given the params.
     ///
@@ -343,9 +326,9 @@ pub trait SemaphoreState {
 ///   Stacking multiple semaphores can be awkward and risk deadlocks.
 ///   Instead, making the state contain all those quantities combined
 ///   can simplify the queueing.
-pub struct Semaphore<S: SemaphoreState + ?Sized> {
+pub struct Semaphore<S: SemaphoreState + ?Sized, C: IsCloseable = Uncloseable> {
     order: FairOrder,
-    state: Mutex<QueueState<S>>,
+    state: Mutex<QueueState<S, C>>,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -380,17 +363,39 @@ impl<S: SemaphoreState + core::fmt::Debug> core::fmt::Debug for Semaphore<S> {
     }
 }
 
-impl<S: SemaphoreState> Semaphore<S> {
-    /// Create a new first-in-first-out semaphore with the given initial state.
-    pub fn new_fifo(state: S) -> Self {
-        Self::new_inner(state, FairOrder::Fifo)
-    }
+pub struct SemaphoreBuilder<C: IsCloseable = Uncloseable> {
+    order: FairOrder,
+    closeable: PhantomData<C>,
+}
 
-    /// Create a new last-in-first-out semaphore with the given initial state.
-    pub fn new_lifo(state: S) -> Self {
-        Self::new_inner(state, FairOrder::Lifo)
+impl SemaphoreBuilder {
+    pub fn fifo() -> Self {
+        Self {
+            order: FairOrder::Fifo,
+            closeable: PhantomData,
+        }
     }
+    pub fn lifo() -> Self {
+        Self {
+            order: FairOrder::Lifo,
+            closeable: PhantomData,
+        }
+    }
+    pub fn closeable(self) -> SemaphoreBuilder<Closeable> {
+        SemaphoreBuilder {
+            order: self.order,
+            closeable: PhantomData,
+        }
+    }
+}
 
+impl<C: IsCloseable> SemaphoreBuilder<C> {
+    pub fn with_state<S: SemaphoreState>(self, state: S) -> Semaphore<S, C> {
+        Semaphore::new_inner(state, self.order)
+    }
+}
+
+impl<S: SemaphoreState, C: IsCloseable> Semaphore<S, C> {
     fn new_inner(state: S, order: FairOrder) -> Self {
         let state = QueueState {
             state,
@@ -405,7 +410,7 @@ impl<S: SemaphoreState> Semaphore<S> {
     }
 }
 
-impl<S: SemaphoreState + ?Sized> Semaphore<S> {
+impl<S: SemaphoreState + ?Sized, C: IsCloseable> Semaphore<S, C> {
     /// Access the state with mutable access.
     ///
     /// This gives direct access to the state, be careful not to
@@ -421,11 +426,11 @@ impl<S: SemaphoreState + ?Sized> Semaphore<S> {
 
     /// Check if the semaphore is closed
     pub fn is_closed(&self) -> bool {
-        <S::Closeable as private::IsCloseable>::CLOSE && self.state.lock().queue.is_err()
+        C::CLOSE && self.state.lock().queue.is_err()
     }
 }
 
-impl<S: SemaphoreState<Closeable = Closeable> + ?Sized> Semaphore<S> {
+impl<S: SemaphoreState + ?Sized> Semaphore<S, Closeable> {
     /// Close the semaphore.
     ///
     /// All tasks currently waiting to acquire a token will immediately stop.
@@ -458,14 +463,20 @@ impl<S: SemaphoreState<Closeable = Closeable> + ?Sized> Semaphore<S> {
 }
 
 mod private {
-    pub trait IsCloseable {
+    pub trait Sealed {
         const CLOSE: bool;
         type Closed<P>;
-
-        fn map_ref<P, R>(p: &Self::Closed<P>, f: impl FnOnce(&P) -> R) -> Self::Closed<R>;
-        fn map<P, R>(p: Self::Closed<P>, f: impl FnOnce(P) -> R) -> Self::Closed<R>;
-        fn into_inner_ref<P>(p: &Self::Closed<P>) -> &P;
     }
+}
+
+/// Whether the semaphore is closeable
+pub trait IsCloseable: private::Sealed {
+    type AcquireError<P>;
+
+    #[doc(hidden)]
+    fn new_err<P>(params: P) -> Self::AcquireError<P>;
+    #[doc(hidden)]
+    fn map_err<P, R>(p: Self::Closed<P>, f: impl FnOnce(P) -> R) -> Self::AcquireError<R>;
 }
 
 /// Controls whether a [`Semaphore`] is closeable.
@@ -474,30 +485,39 @@ pub enum Closeable {}
 /// Controls whether a [`Semaphore`] is not closeable.
 pub enum Uncloseable {}
 
-impl private::IsCloseable for Closeable {
+impl private::Sealed for Closeable {
     const CLOSE: bool = true;
     type Closed<P> = P;
-    fn map_ref<P, R>(p: &Self::Closed<P>, f: impl FnOnce(&P) -> R) -> Self::Closed<R> {
-        f(p)
+}
+
+impl IsCloseable for Closeable {
+    type AcquireError<P> = AcquireError<P>;
+
+    #[doc(hidden)]
+    fn new_err<P>(params: P) -> Self::AcquireError<P> {
+        AcquireError { params }
     }
-    fn map<P, R>(p: Self::Closed<P>, f: impl FnOnce(P) -> R) -> Self::Closed<R> {
-        f(p)
-    }
-    fn into_inner_ref<P>(p: &Self::Closed<P>) -> &P {
-        p
+    #[doc(hidden)]
+    fn map_err<P, R>(p: Self::Closed<P>, f: impl FnOnce(P) -> R) -> Self::AcquireError<R> {
+        AcquireError { params: f(p) }
     }
 }
-impl private::IsCloseable for Uncloseable {
+
+impl private::Sealed for Uncloseable {
     const CLOSE: bool = false;
     type Closed<P> = Self;
-    fn map_ref<P, R>(p: &Self::Closed<P>, _f: impl FnOnce(&P) -> R) -> Self::Closed<R> {
-        match *p {}
+}
+
+impl IsCloseable for Uncloseable {
+    type AcquireError<P> = AcquireError<Uncloseable>;
+
+    #[doc(hidden)]
+    fn new_err<P>(_params: P) -> Self::AcquireError<P> {
+        unreachable!()
     }
-    fn map<P, R>(p: Self::Closed<P>, _f: impl FnOnce(P) -> R) -> Self::Closed<R> {
+    #[doc(hidden)]
+    fn map_err<P, R>(p: Self::Closed<P>, _f: impl FnOnce(P) -> R) -> Self::AcquireError<R> {
         match p {}
-    }
-    fn into_inner_ref<P>(p: &Self::Closed<P>) -> &P {
-        match *p {}
     }
 }
 
@@ -517,13 +537,13 @@ impl core::error::Error for Uncloseable {}
 
 // don't question the weird bounds here...
 struct QueueState<
-    S: SemaphoreState<Params = Params, Permit = Permit, Closeable = Closeable> + ?Sized,
+    S: SemaphoreState<Params = Params, Permit = Permit> + ?Sized,
+    C: IsCloseable,
     Params = <S as SemaphoreState>::Params,
     Permit = <S as SemaphoreState>::Permit,
-    Closeable: private::IsCloseable = <S as SemaphoreState>::Closeable,
 > {
     #[allow(clippy::type_complexity)]
-    queue: Result<PinList<PinQueue<Params, Permit, Closeable>>, Closeable::Closed<()>>,
+    queue: Result<PinList<PinQueue<Params, Permit, C>>, C::Closed<()>>,
     state: S,
 }
 
@@ -535,11 +555,11 @@ type PinQueue<Params, Permit, C> = dyn pin_list::Types<
         // Ok(permit) -> Ready
         // Err(Some(params)) -> Closed
         // Err(None) -> Closed, Invalid state
-        Removed = Result<Permit, <C as private::IsCloseable>::Closed<Option<Params>>>,
+        Removed = Result<Permit, <C as private::Sealed>::Closed<Option<Params>>>,
         Unprotected = (),
     >;
 
-impl<S: SemaphoreState + ?Sized> QueueState<S> {
+impl<S: SemaphoreState + ?Sized, C: IsCloseable> QueueState<S, C> {
     #[inline]
     fn check(&mut self) {
         let Ok(queue) = &mut self.queue else { return };
@@ -565,15 +585,15 @@ impl<S: SemaphoreState + ?Sized> QueueState<S> {
 
 /// The drop-guard for semaphore permits.
 /// Will ensure the permit is released when dropped.
-pub struct Permit<'a, S: SemaphoreState + ?Sized> {
-    inner: DropWrapper<SemWrapper<'a, S>>,
+pub struct Permit<'a, S: SemaphoreState + ?Sized, C: IsCloseable = Uncloseable> {
+    inner: DropWrapper<SemWrapper<'a, S, C>>,
 }
 
-struct SemWrapper<'a, S: SemaphoreState + ?Sized> {
-    sem: &'a Semaphore<S>,
+struct SemWrapper<'a, S: SemaphoreState + ?Sized, C: IsCloseable> {
+    sem: &'a Semaphore<S, C>,
 }
 
-impl<S: SemaphoreState + ?Sized> drop_wrapper::Drop2 for SemWrapper<'_, S> {
+impl<S: SemaphoreState + ?Sized, C: IsCloseable> drop_wrapper::Drop2 for SemWrapper<'_, S, C> {
     type T = S::Permit;
 
     fn drop(&mut self, permit: Self::T) {
@@ -581,7 +601,7 @@ impl<S: SemaphoreState + ?Sized> drop_wrapper::Drop2 for SemWrapper<'_, S> {
     }
 }
 
-impl<S: SemaphoreState + ?Sized> core::fmt::Debug for Permit<'_, S>
+impl<S: SemaphoreState + ?Sized, C: IsCloseable> core::fmt::Debug for Permit<'_, S, C>
 where
     S::Permit: core::fmt::Debug,
 {
@@ -592,11 +612,11 @@ where
     }
 }
 
-impl<'a, S: SemaphoreState + ?Sized> Permit<'a, S> {
+impl<'a, S: SemaphoreState + ?Sized, C: IsCloseable> Permit<'a, S, C> {
     /// Construct a new permit out of thin air, no waiting is required.
     ///
     /// This violates the purpose of the semahpore, but is provided for convenience.
-    pub fn out_of_thin_air(sem: &'a Semaphore<S>, permit: S::Permit) -> Self {
+    pub fn out_of_thin_air(sem: &'a Semaphore<S, C>, permit: S::Permit) -> Self {
         Self {
             inner: DropWrapper::new(SemWrapper { sem }, permit),
         }
@@ -616,7 +636,7 @@ impl<'a, S: SemaphoreState + ?Sized> Permit<'a, S> {
     }
 
     /// Get read access to the associated semaphore
-    pub fn semaphore(&self) -> &'a Semaphore<S> {
+    pub fn semaphore(&self) -> &'a Semaphore<S, C> {
         self.inner.s.sem
     }
 
@@ -628,15 +648,12 @@ impl<'a, S: SemaphoreState + ?Sized> Permit<'a, S> {
 
 #[cfg(test)]
 mod test {
-    use crate::{Closeable, Uncloseable};
-
     #[derive(Debug)]
     struct Dummy;
 
     impl crate::SemaphoreState for Dummy {
         type Params = ();
         type Permit = ();
-        type Closeable = Uncloseable;
 
         fn acquire(&mut self, _params: Self::Params) -> Result<Self::Permit, Self::Params> {
             Ok(())
@@ -647,32 +664,19 @@ mod test {
 
     #[test]
     fn debug() {
-        let s = crate::Semaphore::new_fifo(Dummy);
+        let s = crate::SemaphoreBuilder::fifo().with_state(Dummy);
         let s = std::format!("{s:?}");
         assert_eq!(s, "Semaphore { order: Fifo, state: Dummy, .. }");
     }
 
-    #[derive(Debug)]
-    struct DummyCloseable;
-
-    impl crate::SemaphoreState for DummyCloseable {
-        type Params = ();
-        type Permit = ();
-        type Closeable = Closeable;
-
-        fn acquire(&mut self, _params: Self::Params) -> Result<Self::Permit, Self::Params> {
-            Ok(())
-        }
-
-        fn release(&mut self, _permit: Self::Permit) {}
-    }
-
     #[test]
     fn is_closed() {
-        let s = crate::Semaphore::new_fifo(Dummy);
+        let s = crate::SemaphoreBuilder::fifo().with_state(Dummy);
         assert!(!s.is_closed());
 
-        let s = crate::Semaphore::new_fifo(DummyCloseable);
+        let s = crate::SemaphoreBuilder::fifo()
+            .closeable()
+            .with_state(Dummy);
         assert!(!s.is_closed());
         s.close();
         assert!(s.is_closed());
@@ -684,7 +688,6 @@ mod test {
     impl crate::SemaphoreState for NeverSucceeds {
         type Params = ();
         type Permit = ();
-        type Closeable = Closeable;
 
         fn acquire(&mut self, _params: Self::Params) -> Result<Self::Permit, Self::Params> {
             Err(())
@@ -698,7 +701,7 @@ mod test {
     fn concurrent_closed() {
         loom::model(|| {
             use std::sync::Arc;
-            let s = Arc::new(crate::Semaphore::new_fifo(NeverSucceeds));
+            let s = Arc::new(crate::SemaphoreBuilder::fifo().with_state(NeverSucceeds));
 
             let s2 = s.clone();
             let handle = loom::thread::spawn(move || {
