@@ -31,10 +31,12 @@
 //!   Instead, making the state contain all those quantities combined
 //!   can simplify the queueing.
 //!
-//! # Example
+//! # Examples
+//!
+//! A Semaphore like `tokio::sync::Semaphore`:
 //!
 //! ```
-//!  #[derive(Debug)]
+//! #[derive(Debug)]
 //! struct SemaphoreCounter(usize);
 //!
 //! impl flag_bearer::SemaphoreState for SemaphoreCounter {
@@ -76,6 +78,157 @@
 //!
 //! // close a semaphore
 //! semaphore.close();
+//! # })
+//! ```
+//!
+//! A more complex usecase with the ability to update limits on demand:
+//!
+//! ```
+//! #[derive(Debug)]
+//! struct Utilisation {
+//!     taken: usize,
+//!     limit: usize
+//! }
+//!
+//! impl flag_bearer::SemaphoreState for Utilisation {
+//!     type Params = ();
+//!     type Permit = ();
+//!
+//!     /// This semaphore cannot be closed
+//!     type Closeable = flag_bearer::Uncloseable;
+//!
+//!     fn acquire(&mut self, p: Self::Params) -> Result<Self::Permit, Self::Params> {
+//!         if self.taken < self.limit {
+//!             self.taken += 1;
+//!             Ok(p)
+//!         } else {
+//!             Err(p)
+//!         }
+//!     }
+//!
+//!     fn release(&mut self, _: Self::Permit) {
+//!         self.taken -= 1;
+//!     }
+//! }
+//!
+//! impl Utilisation {
+//!     pub fn new(tokens: usize) -> Self {
+//!         Self { limit: tokens, taken: 0 }
+//!     }
+//!     pub fn add_tokens(&mut self, x: usize) {
+//!         self.limit += x;
+//!     }
+//!     pub fn remove_tokens(&mut self, x: usize) {
+//!         self.limit -= x;
+//!     }
+//! }
+//!
+//! # pollster::block_on(async {
+//! // create a new FIFO semaphore with 20 tokens
+//! let semaphore = flag_bearer::Semaphore::new_fifo(Utilisation::new(20));
+//!
+//! // acquire a permit
+//! let _permit = semaphore.must_acquire(()).await;
+//!
+//! // remove 10 tokens
+//! semaphore.with_state(|s| s.remove_tokens(10));
+//!
+//! // release a permit
+//! drop(_permit);
+//! # })
+//! ```
+//!
+//! A LIFO semaphore which tracks multiple values at once:
+//!
+//! ```
+//! #[derive(Debug)]
+//! struct Utilisation {
+//!     requests: usize,
+//!     bytes: u64,
+//! }
+//!
+//! struct Request {
+//!     bytes: u64,
+//! }
+//!
+//! impl flag_bearer::SemaphoreState for Utilisation {
+//!     type Params = Request;
+//!     type Permit = Request;
+//!
+//!     /// This semaphore cannot be closed
+//!     type Closeable = flag_bearer::Uncloseable;
+//!
+//!     fn acquire(&mut self, p: Self::Params) -> Result<Self::Permit, Self::Params> {
+//!         if self.requests >= 1 && self.bytes >= p.bytes {
+//!             self.requests -= 1;
+//!             self.bytes -= p.bytes;
+//!             Ok(p)
+//!         } else {
+//!             Err(p)
+//!         }
+//!     }
+//!
+//!     fn release(&mut self, p: Self::Permit) {
+//!         self.requests += 1;
+//!         self.bytes += p.bytes;
+//!     }
+//! }
+//!
+//! # pollster::block_on(async {
+//! // create a new LIFO semaphore with support for 1 MB and 20 requests
+//! let semaphore = flag_bearer::Semaphore::new_lifo(Utilisation {
+//!     requests: 20,
+//!     bytes: 1024 * 1024,
+//! });
+//!
+//! // acquire a permit for a request with 64KB
+//! let _permit = semaphore.must_acquire(Request { bytes: 64 * 1024 }).await;
+//! # })
+//! ```
+//!
+//! A connection pool:
+//!
+//! ```
+//! #[derive(Debug)]
+//! struct Connection{
+//!     // ...
+//! }
+//!
+//! #[derive(Debug)]
+//! struct Pool {
+//!     conns: Vec<Connection>,
+//! }
+//!
+//! impl flag_bearer::SemaphoreState for Pool {
+//!     type Params = ();
+//!     type Permit = Connection;
+//!
+//!     /// This pool cannot be closed
+//!     type Closeable = flag_bearer::Uncloseable;
+//!
+//!     fn acquire(&mut self, p: Self::Params) -> Result<Self::Permit, Self::Params> {
+//!         self.conns.pop().ok_or(p)
+//!     }
+//!
+//!     fn release(&mut self, p: Self::Permit) {
+//!         self.conns.push(p);
+//!     }
+//! }
+//!
+//! # pollster::block_on(async {
+//! // Create a new LIFO connection pool with 20 connections
+//! let semaphore = flag_bearer::Semaphore::new_lifo(Pool {
+//!     conns: std::iter::repeat_with(|| Connection {}).take(20).collect(),
+//! });
+//!
+//! // acquire a permit for a request with 64KB
+//! let mut conn_permit = semaphore.must_acquire(()).await;
+//!
+//! // access the inner conn
+//! let _conn = conn_permit.permit_mut();
+//!
+//! // create a conn on-demand:
+//! let mut _conn_permit2 = flag_bearer::Permit::out_of_thin_air(&semaphore, Connection {});
 //! # })
 //! ```
 

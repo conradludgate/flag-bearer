@@ -11,6 +11,16 @@ use crate::{
     private::IsCloseable,
 };
 
+impl<S: SemaphoreState<Closeable = super::Uncloseable> + ?Sized> Semaphore<S> {
+    /// Acquire a new permit fairly with the given parameters.
+    ///
+    /// If a permit is not immediately available, this task will
+    /// join a queue.
+    pub async fn must_acquire(&self, params: S::Params) -> Permit<'_, S> {
+        self.acquire(params).await.unwrap_or_else(|e| e.never())
+    }
+}
+
 impl<S: SemaphoreState + ?Sized> Semaphore<S> {
     #[inline]
     fn try_acquire_inner(
