@@ -8,7 +8,7 @@ publish = false
 flag-bearer = { path = "../flag-bearer", version = "0.1.0-rc.4" }
 
 [dev-dependencies]
-tokio = { version = "1", features = ["full"] }
+tokio = { version = "1", features = ["macros", "rt", "rt-multi-thread", "sync", "time"] }
 futures-testing = { git = "https://github.com/conradludgate/futures-testing" }
 futures-util = { version = "0.3", default-features = false }
 
