@@ -679,7 +679,11 @@ mod test {
     fn concurrent_closed() {
         loom::model(|| {
             use std::sync::Arc;
-            let s = Arc::new(crate::SemaphoreBuilder::fifo().with_state(NeverSucceeds));
+            let s = Arc::new(
+                crate::SemaphoreBuilder::fifo()
+                    .closeable()
+                    .with_state(NeverSucceeds),
+            );
 
             let s2 = s.clone();
             let handle = loom::thread::spawn(move || {
