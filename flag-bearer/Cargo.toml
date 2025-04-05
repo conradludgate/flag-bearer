@@ -7,9 +7,15 @@ description = "Generic async semaphores"
 repository = "https://github.com/conradludgate/flag-bearer"
 
 [dependencies]
-parking_lot = { version = "0.12", default-features = false }
 pin-list = { version = "0.1", default-features = false }
 pin-project-lite = "0.2"
+
+[target.'cfg(target_os ="linux")'.dependencies]
+libc = "0.2.170"
+lock_api = "0.4"
+
+[target.'cfg(not(target_os = "linux"))'.dependencies]
+parking_lot = { version = "0.12", default-features = false }
 
 [dev-dependencies]
 pollster = "0.4"
