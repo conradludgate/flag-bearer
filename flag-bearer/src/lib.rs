@@ -230,7 +230,7 @@
 
 use core::{hint::unreachable_unchecked, marker::PhantomData, task::Waker};
 
-#[cfg(any(test, target_os = "linux"))]
+#[cfg(test)]
 extern crate std;
 
 use pin_list::PinList;
