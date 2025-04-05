@@ -230,33 +230,8 @@
 
 use core::{hint::unreachable_unchecked, marker::PhantomData, task::Waker};
 
-#[cfg(test)]
+#[cfg(any(test, target_os = "linux"))]
 extern crate std;
-
-#[cfg(all(test, loom))]
-mod shim {
-    pub struct Mutex<T: ?Sized>(loom::sync::Mutex<T>);
-    impl<T> Mutex<T> {
-        pub fn new(t: T) -> Self {
-            Self(loom::sync::Mutex::new(t))
-        }
-    }
-
-    impl<T: ?Sized> Mutex<T> {
-        pub fn lock(&self) -> loom::sync::MutexGuard<'_, T> {
-            self.0.lock().unwrap_or_else(|g| g.into_inner())
-        }
-        pub fn try_lock(&self) -> Option<loom::sync::MutexGuard<'_, T>> {
-            self.0.try_lock().ok()
-        }
-    }
-}
-
-#[cfg(all(test, loom))]
-use shim::Mutex;
-
-#[cfg(not(all(test, loom)))]
-use parking_lot::Mutex;
 
 use pin_list::PinList;
 
@@ -265,6 +240,9 @@ pub use acquire::{AcquireError, TryAcquireError};
 
 mod drop_wrapper;
 use drop_wrapper::DropWrapper;
+
+mod mutex;
+use mutex::Mutex;
 
 /// The trait defining how [`Semaphore`]s behave.
 pub trait SemaphoreState {
