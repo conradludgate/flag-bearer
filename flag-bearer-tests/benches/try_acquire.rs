@@ -15,20 +15,40 @@ fn main() {
 
     println!("flag_bearer[threads = {t}]:");
     let semaphore = semaphore::Semaphore::new(0);
-    let h = bench(t, rounds, iters, &semaphore, async |s| {
+    async_bench(t, rounds, iters, semaphore, async |s| {
         black_box(s.try_acquire());
     });
-    print_results(h);
 
     println!("tokio[threads = {t}]:");
     let semaphore = tokio::sync::Semaphore::new(0);
-    let h = bench(t, rounds, iters, &semaphore, async |s| {
+    async_bench(t, rounds, iters, semaphore, async |s| {
         drop(black_box(s.try_acquire()));
     });
-    print_results(h);
 }
 
-fn print_results(h: Histogram<u64>) {
+#[inline(never)]
+fn async_bench<S: Sync>(
+    threads: usize,
+    rounds: usize,
+    iterations: u32,
+    state: S,
+    f: impl AsyncFn(&S) + Sync,
+) {
+    let h = {
+        bench_threads(threads, rounds, &|barrier| {
+            pollster::block_on(async {
+                barrier.wait();
+                let start = Instant::now();
+
+                for _ in 0..iterations {
+                    f(black_box(&state)).await
+                }
+
+                start.elapsed() / iterations
+            })
+        })
+    };
+
     for q in [0.5, 0.75, 0.9, 0.99, 0.999] {
         println!(
             "\t{}'th percentile of data is {:?}",
@@ -39,41 +59,28 @@ fn print_results(h: Histogram<u64>) {
     println!()
 }
 
-fn bench<S: Sync>(
+#[inline(never)]
+fn bench_threads(
     threads: usize,
     rounds: usize,
-    iterations: u32,
-    state: &S,
-    f: impl AsyncFn(&S) + Sync,
+    f: &(dyn Fn(&Barrier) -> Duration + Sync),
 ) -> Histogram<u64> {
     let barrier = Barrier::new(threads);
-    let runtime = tokio::runtime::Runtime::new().unwrap();
-
-    let warmup = 100;
-
+    let warmup = rounds / 100;
     std::thread::scope(|s| {
         let mut handles = Vec::with_capacity(threads);
 
         for _ in 0..threads {
             handles.push(s.spawn(|| {
                 let mut h = Histogram::<u64>::new(3).unwrap();
+
                 for round in 0..rounds + warmup {
                     if round == warmup {
                         h.reset();
                     }
-
-                    barrier.wait();
-                    let start = Instant::now();
-
-                    runtime.block_on(async {
-                        for _ in 0..iterations {
-                            f(state).await
-                        }
-                    });
-
-                    let d = start.elapsed() / iterations;
-                    h += d.as_nanos() as u64;
+                    h += f(&barrier).as_nanos() as u64;
                 }
+
                 h
             }));
         }

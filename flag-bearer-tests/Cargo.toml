@@ -13,6 +13,7 @@ futures-testing = { git = "https://github.com/conradludgate/futures-testing" }
 futures-util = { version = "0.3", default-features = false }
 
 hdrhistogram = "7.5.4"
+pollster = "0.4"
 
 [[bench]]
 harness = false
