@@ -9,6 +9,11 @@ pub(crate) mod private {
 
 /// Whether the semaphore is closeable
 pub trait IsCloseable: private::Sealed {
+    /// The error returned during [`Semaphore::acquire`](crate::Semaphore::acquire).
+    /// It will be a variant of [`AcquireError`].
+    ///
+    /// * [`Closeable`] semaphores return a [`AcquireError<P>`].
+    /// * [`Uncloseable`] semaphores return [`AcquireError<Uncloseable>`].
     type AcquireError<P>;
 
     #[doc(hidden)]

@@ -294,7 +294,10 @@ use core::marker::PhantomData;
 extern crate std;
 
 use mutex::Mutex;
-use queue::QueueState;
+use queue::{
+    QueueState,
+    acquire::{Acquire, Fairness},
+};
 
 mod closeable;
 mod drop_wrapper;
@@ -307,7 +310,10 @@ pub use permit::Permit;
 pub use queue::acquire::{AcquireError, TryAcquireError};
 
 /// A Builder for [`Semaphore`]s.
-pub struct Builder<C: IsCloseable = Uncloseable> {
+pub struct Builder<C = Uncloseable>
+where
+    C: IsCloseable,
+{
     order: FairOrder,
     closeable: PhantomData<C>,
 }
@@ -338,7 +344,10 @@ impl Builder {
     }
 }
 
-impl<C: IsCloseable> Builder<C> {
+impl<C> Builder<C>
+where
+    C: IsCloseable,
+{
     /// Build the [`Semaphore`] with the provided initial state.
     pub fn with_state<S: SemaphoreState>(self, state: S) -> Semaphore<S, C> {
         Semaphore::new_inner(state, self.order)
@@ -401,7 +410,11 @@ pub trait SemaphoreState {
 /// See the [top level docs](crate) for information about semaphores.
 ///
 /// See [`Builder`] for methods to construct a [`Semaphore`].
-pub struct Semaphore<S: SemaphoreState + ?Sized, C: IsCloseable = Uncloseable> {
+pub struct Semaphore<S, C = Uncloseable>
+where
+    S: SemaphoreState + ?Sized,
+    C: IsCloseable,
+{
     order: FairOrder,
     state: Mutex<QueueState<S, C>>,
 }
@@ -448,7 +461,101 @@ impl<S: SemaphoreState + core::fmt::Debug> core::fmt::Debug for Semaphore<S> {
     }
 }
 
-impl<S: SemaphoreState + ?Sized, C: IsCloseable> Semaphore<S, C> {
+impl<S> Semaphore<S, Uncloseable>
+where
+    S: SemaphoreState + ?Sized,
+{
+    /// Acquire a new permit fairly with the given parameters.
+    ///
+    /// If a permit is not immediately available, this task will
+    /// join a queue.
+    pub async fn must_acquire(&self, params: S::Params) -> Permit<'_, S, Uncloseable> {
+        self.acquire(params).await.unwrap_or_else(|e| e.never())
+    }
+}
+
+impl<S, C> Semaphore<S, C>
+where
+    S: SemaphoreState + ?Sized,
+    C: IsCloseable,
+{
+    /// Acquire a new permit fairly with the given parameters.
+    ///
+    /// If a permit is not immediately available, this task will
+    /// join a queue.
+    ///
+    /// # Errors
+    ///
+    /// If this semaphore [`is_closed`](Semaphore::is_closed), then an [`AcquireError`] is returned.
+    pub async fn acquire(
+        &self,
+        params: S::Params,
+    ) -> Result<Permit<'_, S, C>, C::AcquireError<S::Params>> {
+        let acquire = Acquire::new(self, params);
+        Ok(Permit::out_of_thin_air(self, acquire.await?))
+    }
+
+    #[inline]
+    fn try_acquire_inner(
+        &self,
+        params: S::Params,
+        fairness: Fairness,
+    ) -> Result<S::Permit, TryAcquireError<S::Params, C>> {
+        let mut state = self.state.lock();
+        match state.unlinked_try_acquire(params, self.order, fairness) {
+            Ok(permit) => Ok(permit),
+            Err(params) => Err(params),
+        }
+    }
+
+    /// Acquire a new permit fairly with the given parameters.
+    ///
+    /// If this is a LIFO semaphore, and there are other tasks waiting for permits,
+    /// this will still try to acquire the permit - as this task would effectively
+    /// be the last in the queue.
+    ///
+    /// # Errors
+    ///
+    /// If there are currently not enough permits available for the given request,
+    /// then [`TryAcquireError::NoPermits`] is returned.
+    ///
+    /// If this is a FIFO semaphore, and there are other tasks waiting for permits,
+    /// then [`TryAcquireError::NoPermits`] is returned.
+    ///
+    /// If this semaphore [`is_closed`](Semaphore::is_closed), then [`TryAcquireError::Closed`] is returned.
+    pub fn try_acquire(
+        &self,
+        params: S::Params,
+    ) -> Result<Permit<'_, S, C>, TryAcquireError<S::Params, C>> {
+        let permit = self.try_acquire_inner(params, Fairness::Fair)?;
+        Ok(Permit::out_of_thin_air(self, permit))
+    }
+
+    /// Acquire a new permit, potentially unfairly, with the given parameters.
+    ///
+    /// If this is a FIFO semaphore, and there are other tasks waiting for permits,
+    /// this will still try to acquire the permit.
+    ///
+    /// # Errors
+    ///
+    /// If there are currently not enough permits available for the given request,
+    /// then [`TryAcquireError::NoPermits`] is returned.
+    ///
+    /// If this semaphore [`is_closed`](Semaphore::is_closed), then [`TryAcquireError::Closed`] is returned.
+    pub fn try_acquire_unfair(
+        &self,
+        params: S::Params,
+    ) -> Result<Permit<'_, S, C>, TryAcquireError<S::Params, C>> {
+        let permit = self.try_acquire_inner(params, Fairness::Unfair)?;
+        Ok(Permit::out_of_thin_air(self, permit))
+    }
+}
+
+impl<S, C> Semaphore<S, C>
+where
+    S: SemaphoreState + ?Sized,
+    C: IsCloseable,
+{
     /// Access the state with mutable access.
     ///
     /// This gives direct access to the state, be careful not to
@@ -468,7 +575,10 @@ impl<S: SemaphoreState + ?Sized, C: IsCloseable> Semaphore<S, C> {
     }
 }
 
-impl<S: SemaphoreState + ?Sized> Semaphore<S, Closeable> {
+impl<S> Semaphore<S, Closeable>
+where
+    S: SemaphoreState + ?Sized,
+{
     /// Close the semaphore.
     ///
     /// All tasks currently waiting to acquire a token will immediately stop.
@@ -506,9 +616,7 @@ mod test {
         let s = crate::Builder::fifo().with_state(Dummy);
         assert!(!s.is_closed());
 
-        let s = crate::Builder::fifo()
-            .closeable()
-            .with_state(Dummy);
+        let s = crate::Builder::fifo().closeable().with_state(Dummy);
         assert!(!s.is_closed());
         s.close();
         assert!(s.is_closed());
@@ -533,11 +641,7 @@ mod test {
     fn concurrent_closed() {
         loom::model(|| {
             use std::sync::Arc;
-            let s = Arc::new(
-                crate::Builder::fifo()
-                    .closeable()
-                    .with_state(NeverSucceeds),
-            );
+            let s = Arc::new(crate::Builder::fifo().closeable().with_state(NeverSucceeds));
 
             let s2 = s.clone();
             let handle = loom::thread::spawn(move || {

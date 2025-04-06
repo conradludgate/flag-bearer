@@ -6,100 +6,12 @@ use core::{
 
 use pin_list::{Node, NodeData};
 
-use crate::{FairOrder, IsCloseable, Permit, QueueState, Semaphore, SemaphoreState, Uncloseable};
+use crate::{FairOrder, IsCloseable, QueueState, Semaphore, SemaphoreState, Uncloseable};
 
 use super::PinQueue;
 
-impl<S: SemaphoreState + ?Sized> Semaphore<S, Uncloseable> {
-    /// Acquire a new permit fairly with the given parameters.
-    ///
-    /// If a permit is not immediately available, this task will
-    /// join a queue.
-    pub async fn must_acquire(&self, params: S::Params) -> Permit<'_, S, Uncloseable> {
-        self.acquire(params).await.unwrap_or_else(|e| e.never())
-    }
-}
-
-impl<S: SemaphoreState + ?Sized, C: IsCloseable> Semaphore<S, C> {
-    #[inline]
-    fn try_acquire_inner(
-        &self,
-        params: S::Params,
-        fairness: Fairness,
-    ) -> Result<S::Permit, TryAcquireError<S::Params, C>> {
-        let mut state = self.state.lock();
-        match state.unlinked_try_acquire(params, self.order, fairness) {
-            Ok(permit) => Ok(permit),
-            Err(params) => Err(params),
-        }
-    }
-
-    /// Acquire a new permit fairly with the given parameters.
-    ///
-    /// If a permit is not immediately available, this task will
-    /// join a queue.
-    ///
-    /// # Errors
-    ///
-    /// If this semaphore [`is_closed`](Semaphore::is_closed), then an [`AcquireError`] is returned.
-    pub async fn acquire(
-        &self,
-        params: S::Params,
-    ) -> Result<Permit<'_, S, C>, C::AcquireError<S::Params>> {
-        let acquire = Acquire {
-            sem: self,
-            node: Node::new(),
-            params: Some(params),
-        };
-
-        Ok(Permit::out_of_thin_air(self, acquire.await?))
-    }
-
-    /// Acquire a new permit fairly with the given parameters.
-    ///
-    /// If this is a LIFO semaphore, and there are other tasks waiting for permits,
-    /// this will still try to acquire the permit - as this task would effectively
-    /// be the last in the queue.
-    ///
-    /// # Errors
-    ///
-    /// If there are currently not enough permits available for the given request,
-    /// then [`TryAcquireError::NoPermits`] is returned.
-    ///
-    /// If this is a FIFO semaphore, and there are other tasks waiting for permits,
-    /// then [`TryAcquireError::NoPermits`] is returned.
-    ///
-    /// If this semaphore [`is_closed`](Semaphore::is_closed), then [`TryAcquireError::Closed`] is returned.
-    pub fn try_acquire(
-        &self,
-        params: S::Params,
-    ) -> Result<Permit<'_, S, C>, TryAcquireError<S::Params, C>> {
-        let permit = self.try_acquire_inner(params, Fairness::Fair)?;
-        Ok(Permit::out_of_thin_air(self, permit))
-    }
-
-    /// Acquire a new permit, potentially unfairly, with the given parameters.
-    ///
-    /// If this is a FIFO semaphore, and there are other tasks waiting for permits,
-    /// this will still try to acquire the permit.
-    ///
-    /// # Errors
-    ///
-    /// If there are currently not enough permits available for the given request,
-    /// then [`TryAcquireError::NoPermits`] is returned.
-    ///
-    /// If this semaphore [`is_closed`](Semaphore::is_closed), then [`TryAcquireError::Closed`] is returned.
-    pub fn try_acquire_unfair(
-        &self,
-        params: S::Params,
-    ) -> Result<Permit<'_, S, C>, TryAcquireError<S::Params, C>> {
-        let permit = self.try_acquire_inner(params, Fairness::Unfair)?;
-        Ok(Permit::out_of_thin_air(self, permit))
-    }
-}
-
 pin_project_lite::pin_project! {
-    struct Acquire<'a, S, C>
+    pub(crate) struct Acquire<'a, S, C>
     where
         S: ?Sized,
         S: SemaphoreState,
@@ -141,6 +53,16 @@ pin_project_lite::pin_project! {
                     }
                 }
             }
+        }
+    }
+}
+
+impl<'a, S: SemaphoreState + ?Sized, C: IsCloseable> Acquire<'a, S, C> {
+    pub(crate) fn new(sem: &'a Semaphore<S, C>, params: S::Params) -> Self {
+        Self {
+            node: Node::new(),
+            sem,
+            params: Some(params),
         }
     }
 }
@@ -201,7 +123,7 @@ impl<S: SemaphoreState + ?Sized, C: IsCloseable> Future for Acquire<'_, S, C> {
     }
 }
 
-enum Fairness {
+pub(crate) enum Fairness {
     Fair,
     Unfair,
 }
@@ -214,7 +136,7 @@ impl Fairness {
 
 impl<S: SemaphoreState + ?Sized, C: IsCloseable> QueueState<S, C> {
     #[inline]
-    fn unlinked_try_acquire(
+    pub(crate) fn unlinked_try_acquire(
         &mut self,
         params: S::Params,
         order: FairOrder,
