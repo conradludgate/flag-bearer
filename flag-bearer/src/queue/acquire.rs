@@ -128,8 +128,8 @@ pin_project_lite::pin_project! {
                     let (data, _unprotected) = node.reset(queue);
                     if let NodeData::Removed(Ok(permit)) = data {
                         state.state.release(permit);
+                        state.check();
                     }
-                    state.check();
                 }
                 Err(_closed) => {
                     // Safety: If the semaphore is closed (meaning we have no queue)

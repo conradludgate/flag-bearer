@@ -435,9 +435,7 @@ pub struct Semaphore<S: SemaphoreState + ?Sized, C: IsCloseable = Uncloseable> {
 
 impl<S: SemaphoreState, C: IsCloseable> Semaphore<S, C> {
     fn new_inner(state: S, order: FairOrder) -> Self {
-        // Safety: during acquire, we ensure that nodes in this queue
-        // will never attempt to use a different queue to read the nodes.
-        let state = unsafe { QueueState::new(state) };
+        let state = QueueState::new(state);
         Self {
             state: Mutex::new(state),
             order,

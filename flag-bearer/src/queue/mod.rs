@@ -37,11 +37,11 @@ type PinQueue<Params, Permit, C> = dyn pin_list::Types<
     >;
 
 impl<S: SemaphoreState, C: IsCloseable> QueueState<S, C> {
-    /// Safety: Node's linked into this queue must only access against the same queue.
-    pub(crate) unsafe fn new(state: S) -> Self {
+    pub(crate) fn new(state: S) -> Self {
         Self {
             state,
-            // Safety: from caller
+            // Safety: during acquire, we ensure that nodes in this queue
+            // will never attempt to use a different queue to read the nodes.
             queue: Ok(PinList::new(unsafe { pin_list::id::DebugChecked::new() })),
         }
     }
