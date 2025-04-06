@@ -31,7 +31,16 @@
 //!   Instead, making the state contain all those quantities combined
 //!   can simplify the queueing.
 //!
-//! # Examples
+//! ## Performance
+//!
+//! My performance testing has shown that `flag_bearer`'s [`Semaphore`] is competitive
+//! with [`tokio::sync::Semaphore`](https://docs.rs/tokio/latest/tokio/sync/struct.Semaphore.html).
+//!
+//! The only exception is in the case when `try_acquire` is called with no permits available,
+//! `tokio` only needs a single atomic read for this case, whereas `flag_bearer` still needs to acquire a lock.
+//! This is measurable, but mostly in the contended usecase.
+//!
+//! ## Examples
 //!
 //! A Semaphore like `tokio::sync::Semaphore`:
 //!
@@ -244,7 +253,69 @@ use drop_wrapper::DropWrapper;
 mod mutex;
 use mutex::Mutex;
 
+/// A Builder for [`Semaphore`]s.
+pub struct SemaphoreBuilder<C: IsCloseable = Uncloseable> {
+    order: FairOrder,
+    closeable: PhantomData<C>,
+}
+
+impl SemaphoreBuilder {
+    /// Create a new first-in-first-out semaphore builder
+    pub fn fifo() -> Self {
+        Self {
+            order: FairOrder::Fifo,
+            closeable: PhantomData,
+        }
+    }
+
+    /// Create a new last-in-first-out semaphore builder
+    pub fn lifo() -> Self {
+        Self {
+            order: FairOrder::Lifo,
+            closeable: PhantomData,
+        }
+    }
+
+    /// The semaphore this builder constructs will be closeable.
+    pub fn closeable(self) -> SemaphoreBuilder<Closeable> {
+        SemaphoreBuilder {
+            order: self.order,
+            closeable: PhantomData,
+        }
+    }
+}
+
+impl<C: IsCloseable> SemaphoreBuilder<C> {
+    /// Build the [`Semaphore`] with the provided initial state.
+    pub fn with_state<S: SemaphoreState>(self, state: S) -> Semaphore<S, C> {
+        Semaphore::new_inner(state, self.order)
+    }
+}
+
 /// The trait defining how [`Semaphore`]s behave.
+///
+/// The usage of this state is as follows:
+/// ```
+/// # use flag_bearer::SemaphoreState;
+/// # use std::sync::Mutex;
+/// fn get_permit<S: SemaphoreState>(s: &Mutex<S>, mut params: S::Params) -> S::Permit {
+///     loop {
+///         let mut s = s.lock().unwrap();
+///         match s.acquire(params) {
+///             Ok(permit) => break permit,
+///             Err(p) => params = p,
+///         }
+///
+///         // sleep/spin/yield until time to try again
+///     }
+/// }
+///
+/// fn return_permit<S: SemaphoreState>(s: &Mutex<S>, permit: S::Permit) {
+///     s.lock().unwrap().release(permit);
+/// }
+/// ```
+///
+/// This is + async queueing is implemented for you by [`Semaphore`], with RAII returning via [`Permit`].
 pub trait SemaphoreState {
     /// What type is used to request permits.
     ///
@@ -309,6 +380,21 @@ pub struct Semaphore<S: SemaphoreState + ?Sized, C: IsCloseable = Uncloseable> {
     state: Mutex<QueueState<S, C>>,
 }
 
+impl<S: SemaphoreState, C: IsCloseable> Semaphore<S, C> {
+    fn new_inner(state: S, order: FairOrder) -> Self {
+        let state = QueueState {
+            state,
+            // Safety: during acquire, we ensure that nodes in this queue
+            // will never attempt to use a different queue to read the nodes.
+            queue: Ok(PinList::new(unsafe { pin_list::id::DebugChecked::new() })),
+        };
+        Self {
+            state: Mutex::new(state),
+            order,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy)]
 enum FairOrder {
     /// Last in, first out.
@@ -338,53 +424,6 @@ impl<S: SemaphoreState + core::fmt::Debug> core::fmt::Debug for Semaphore<S> {
             }
         }
         d.finish_non_exhaustive()
-    }
-}
-
-pub struct SemaphoreBuilder<C: IsCloseable = Uncloseable> {
-    order: FairOrder,
-    closeable: PhantomData<C>,
-}
-
-impl SemaphoreBuilder {
-    pub fn fifo() -> Self {
-        Self {
-            order: FairOrder::Fifo,
-            closeable: PhantomData,
-        }
-    }
-    pub fn lifo() -> Self {
-        Self {
-            order: FairOrder::Lifo,
-            closeable: PhantomData,
-        }
-    }
-    pub fn closeable(self) -> SemaphoreBuilder<Closeable> {
-        SemaphoreBuilder {
-            order: self.order,
-            closeable: PhantomData,
-        }
-    }
-}
-
-impl<C: IsCloseable> SemaphoreBuilder<C> {
-    pub fn with_state<S: SemaphoreState>(self, state: S) -> Semaphore<S, C> {
-        Semaphore::new_inner(state, self.order)
-    }
-}
-
-impl<S: SemaphoreState, C: IsCloseable> Semaphore<S, C> {
-    fn new_inner(state: S, order: FairOrder) -> Self {
-        let state = QueueState {
-            state,
-            // Safety: during acquire, we ensure that nodes in this queue
-            // will never attempt to use a different queue to read the nodes.
-            queue: Ok(PinList::new(unsafe { pin_list::id::DebugChecked::new() })),
-        };
-        Self {
-            state: Mutex::new(state),
-            order,
-        }
     }
 }
 
