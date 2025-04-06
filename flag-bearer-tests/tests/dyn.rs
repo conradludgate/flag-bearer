@@ -1,6 +1,6 @@
 use std::sync::Arc;
 
-use flag_bearer::{Semaphore, SemaphoreBuilder, SemaphoreState};
+use flag_bearer::{Semaphore, Builder, SemaphoreState};
 
 #[derive(Debug)]
 struct Dummy;
@@ -39,10 +39,10 @@ impl SemaphoreState for Counter {
 #[tokio::test]
 async fn trait_object() {
     let s1: Arc<Semaphore<dyn SemaphoreState<Params = (), Permit = ()>>> =
-        Arc::new(SemaphoreBuilder::fifo().with_state(Dummy));
+        Arc::new(Builder::fifo().with_state(Dummy));
 
     let s2: Arc<Semaphore<dyn SemaphoreState<Params = (), Permit = ()>>> =
-        Arc::new(SemaphoreBuilder::fifo().with_state(Counter(1)));
+        Arc::new(Builder::fifo().with_state(Counter(1)));
 
     let _p1 = s1.acquire(()).await.unwrap_or_else(|x| x.never());
     let _p2 = s2.acquire(()).await.unwrap_or_else(|x| x.never());

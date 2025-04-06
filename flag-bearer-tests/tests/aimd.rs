@@ -1,6 +1,6 @@
 use std::time::Duration;
 
-use flag_bearer::{SemaphoreBuilder, SemaphoreState};
+use flag_bearer::{Builder, SemaphoreState};
 
 #[derive(Debug)]
 pub struct Aimd {
@@ -88,7 +88,7 @@ async fn check() {
         inc: 1,
         dec: 0.5,
     };
-    let sem = SemaphoreBuilder::fifo().with_state(AimdState {
+    let sem = Builder::fifo().with_state(AimdState {
         acquired: 0,
         state: Aimd::new(config),
     });

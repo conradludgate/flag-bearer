@@ -42,7 +42,7 @@ mod semaphore {
         pub const MAX_PERMITS: usize = usize::MAX;
 
         pub fn new(count: usize) -> Self {
-            Self(flag_bearer::SemaphoreBuilder::lifo().with_state(SemaphoreCounter(count)))
+            Self(flag_bearer::Builder::lifo().with_state(SemaphoreCounter(count)))
         }
 
         pub async fn acquire(&self) -> Option<Permit<'_>> {

@@ -1,51 +1,10 @@
 # flag-bearer: a generic async semaphore
 
+<!-- [![Tests](https://img.shields.io/github/actions/workflow/status/conradludgate/flag-bearer/test.yml?style=flat-square)](https://github.com/conradludgate/flag-bearer/actions/workflows/test.yml) -->
+![License: Apache-2.0 OR MIT](https://img.shields.io/crates/l/flag-bearer?style=flat-square)
+[![](https://img.shields.io/crates/v/flag-bearer?style=flat-square)](https://crates.io/crates/flag-bearer)
+[![](https://img.shields.io/docsrs/flag-bearer/latest?style=flat-square)](https://docs.rs/flag-bearer/latest/flag-bearer/)
+
 Semaphores are very useful primitives, but the default tokio Semaphore is limited in it's functionality.
 
 This crate aims to fill a gap left by tokio, to have extra functionality to track to permits available.
-
-## Example usecase
-
-You want to limit number of active HTTP requests, as well as total buffer allocations for the body.
-
-You could define the semaphore state like so.
-
-```rust
-use flag_bearer::{Semaphore, SemaphoreState};
-
-#[derive(Debug)]
-pub struct SemaphoreCounter {
-    bytes: u64,
-    requests: usize,
-};
-
-pub struct Request {
-    bytes: u64,
-}
-
-impl SemaphoreState for SemaphoreCounter {
-    type Params = Request;
-    type Permit = Request;
-
-    fn acquire(&mut self, params: Self::Params) -> Result<Self::Permit, Self::Params> {
-        if self.bytes >= params.bytes && self.requests > 0 {
-            self.bytes -= params.bytes;
-            self.requests -= 1;
-
-            Ok(params)
-        } else {
-            Err(params)
-        }
-    }
-
-    fn release(&mut self, permit: Self::Permit) {
-        self.bytes += permit.bytes;
-        self.requests += 1;
-    }
-}
-
-let semaphore = SemaphoreBuilder::fifo().with_state(SemaphoreCounter {
-    bytes: 10 * 1024 * 1024, // 10 MiB.
-    requests: 10, // 10 requests.
-})
-```

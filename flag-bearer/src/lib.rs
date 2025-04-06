@@ -71,7 +71,7 @@
 //!
 //! # pollster::block_on(async {
 //! // create a new FIFO semaphore with 20 permits
-//! let semaphore = flag_bearer::SemaphoreBuilder::fifo().closeable().with_state(SemaphoreCounter(20));
+//! let semaphore = flag_bearer::Builder::fifo().closeable().with_state(SemaphoreCounter(20));
 //!
 //! // acquire a token
 //! let _permit = semaphore.acquire(1).await.expect("semaphore shouldn't be closed");
@@ -134,7 +134,7 @@
 //!
 //! # pollster::block_on(async {
 //! // create a new FIFO semaphore with 20 tokens
-//! let semaphore = flag_bearer::SemaphoreBuilder::fifo().with_state(Utilisation::new(20));
+//! let semaphore = flag_bearer::Builder::fifo().with_state(Utilisation::new(20));
 //!
 //! // acquire a permit
 //! let _permit = semaphore.must_acquire(()).await;
@@ -194,7 +194,7 @@
 //!
 //! # pollster::block_on(async {
 //! // create a new LIFO semaphore with support for 1 MB and 20 requests
-//! let semaphore = flag_bearer::SemaphoreBuilder::lifo().with_state(Utilisation {
+//! let semaphore = flag_bearer::Builder::lifo().with_state(Utilisation {
 //!     requests: 20,
 //!     bytes: 1024 * 1024,
 //! });
@@ -271,7 +271,7 @@
 //! // We choose LIFO here because we create new connections on timeout, and LIFO is
 //! // more likely to have timeouts but on fewer tasks, which ends up improving our
 //! // performance.
-//! let semaphore = flag_bearer::SemaphoreBuilder::lifo().with_state(Pool::default());
+//! let semaphore = flag_bearer::Builder::lifo().with_state(Pool::default());
 //!
 //! let mut conn = acquire_conn(&semaphore).await;
 //!
@@ -307,12 +307,12 @@ pub use permit::Permit;
 pub use queue::acquire::{AcquireError, TryAcquireError};
 
 /// A Builder for [`Semaphore`]s.
-pub struct SemaphoreBuilder<C: IsCloseable = Uncloseable> {
+pub struct Builder<C: IsCloseable = Uncloseable> {
     order: FairOrder,
     closeable: PhantomData<C>,
 }
 
-impl SemaphoreBuilder {
+impl Builder {
     /// Create a new first-in-first-out semaphore builder
     pub fn fifo() -> Self {
         Self {
@@ -330,15 +330,15 @@ impl SemaphoreBuilder {
     }
 
     /// The semaphore this builder constructs will be closeable.
-    pub fn closeable(self) -> SemaphoreBuilder<Closeable> {
-        SemaphoreBuilder {
+    pub fn closeable(self) -> Builder<Closeable> {
+        Builder {
             order: self.order,
             closeable: PhantomData,
         }
     }
 }
 
-impl<C: IsCloseable> SemaphoreBuilder<C> {
+impl<C: IsCloseable> Builder<C> {
     /// Build the [`Semaphore`] with the provided initial state.
     pub fn with_state<S: SemaphoreState>(self, state: S) -> Semaphore<S, C> {
         Semaphore::new_inner(state, self.order)
@@ -392,42 +392,15 @@ pub trait SemaphoreState {
     /// Return the permit back to the semaphore.
     ///
     /// Note: This is not guaranteed to be called for every acquire call.
-    /// Permits can be modified or forgotten.
+    /// Permits can be modified or forgotten, or created at will.
     fn release(&mut self, permit: Self::Permit);
 }
 
 /// Generic semaphore performing asynchronous permit acquisition.
 ///
-/// A semaphore maintains a set of permits. Permits are used to synchronize
-/// access to a shared resource. A semaphore differs from a mutex in that it
-/// can allow more than one concurrent caller to access the shared resource at a
-/// time.
+/// See the [top level docs](crate) for information about semaphores.
 ///
-/// When `acquire` is called and the semaphore has remaining permits, the
-/// function immediately returns a permit. However, if no remaining permits are
-/// available, `acquire` (asynchronously) waits until an outstanding permit is
-/// dropped. At this point, the freed permit is assigned to the caller.
-///
-/// This `Semaphore` is fair, and supports both FIFO and LIFO modes.
-/// * In FIFO mode, this fairness means that permits are given out in the order
-///   they were requested.
-/// * In LIFO mode, this fairness means that permits are given out in the reverse
-///   order they were requested.
-///
-/// This fairness is also applied when `acquire` with high 'parameters' gets
-/// involved, so if a call to `acquire` at the end of the queue requests
-/// more permits than currently available, this can prevent another call to `acquire`
-/// from completing, even if the semaphore has enough permits to complete it.
-///
-/// This semaphore is generic, which means you can customise the state.
-/// Examples:
-/// * Using two counters, you can immediately remove permits,
-///   while there are some still in flight. This might be useful
-///   if you want to remove concurrency if failures are detected.
-/// * There might be multiple quantities you want to limit over.
-///   Stacking multiple semaphores can be awkward and risk deadlocks.
-///   Instead, making the state contain all those quantities combined
-///   can simplify the queueing.
+/// See [`Builder`] for methods to construct a [`Semaphore`].
 pub struct Semaphore<S: SemaphoreState + ?Sized, C: IsCloseable = Uncloseable> {
     order: FairOrder,
     state: Mutex<QueueState<S, C>>,
@@ -523,17 +496,17 @@ mod test {
 
     #[test]
     fn debug() {
-        let s = crate::SemaphoreBuilder::fifo().with_state(Dummy);
+        let s = crate::Builder::fifo().with_state(Dummy);
         let s = std::format!("{s:?}");
         assert_eq!(s, "Semaphore { order: Fifo, state: Dummy, .. }");
     }
 
     #[test]
     fn is_closed() {
-        let s = crate::SemaphoreBuilder::fifo().with_state(Dummy);
+        let s = crate::Builder::fifo().with_state(Dummy);
         assert!(!s.is_closed());
 
-        let s = crate::SemaphoreBuilder::fifo()
+        let s = crate::Builder::fifo()
             .closeable()
             .with_state(Dummy);
         assert!(!s.is_closed());
@@ -561,7 +534,7 @@ mod test {
         loom::model(|| {
             use std::sync::Arc;
             let s = Arc::new(
-                crate::SemaphoreBuilder::fifo()
+                crate::Builder::fifo()
                     .closeable()
                     .with_state(NeverSucceeds),
             );

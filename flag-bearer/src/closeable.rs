@@ -17,10 +17,10 @@ pub trait IsCloseable: private::Sealed {
     fn map_err<P, R>(p: Self::Closed<P>, f: impl FnOnce(P) -> R) -> Self::AcquireError<R>;
 }
 
-/// Controls whether a [`Semaphore`] is closeable.
+/// Controls whether a [`Semaphore`](crate::Semaphore) is closeable.
 pub enum Closeable {}
 
-/// Controls whether a [`Semaphore`] is not closeable.
+/// Controls whether a [`Semaphore`](crate::Semaphore) is not closeable.
 pub enum Uncloseable {}
 
 impl private::Sealed for Closeable {

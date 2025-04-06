@@ -268,7 +268,7 @@ impl<S: SemaphoreState + ?Sized, C: IsCloseable> QueueState<S, C> {
 ///     }
 /// }
 ///
-/// let s = flag_bearer::SemaphoreBuilder::fifo().with_state(Counter(0));
+/// let s = flag_bearer::Builder::fifo().with_state(Counter(0));
 ///
 /// match s.try_acquire(()) {
 ///     Err(flag_bearer::TryAcquireError::NoPermits(_)) => {},
@@ -276,7 +276,7 @@ impl<S: SemaphoreState + ?Sized, C: IsCloseable> QueueState<S, C> {
 /// }
 /// ```
 ///
-/// ### Closed
+/// ### Closed
 ///
 /// ```
 /// struct Counter(usize);
@@ -299,7 +299,7 @@ impl<S: SemaphoreState + ?Sized, C: IsCloseable> QueueState<S, C> {
 ///     }
 /// }
 ///
-/// let s = flag_bearer::SemaphoreBuilder::fifo().closeable().with_state(Counter(1));
+/// let s = flag_bearer::Builder::fifo().closeable().with_state(Counter(1));
 ///
 /// // closing the semaphore makes all current and new acquire() calls return an error.
 /// s.close();
@@ -350,7 +350,7 @@ impl<P, C: IsCloseable> fmt::Display for TryAcquireError<P, C> {
 /// }
 ///
 /// # pollster::block_on(async move {
-/// let s = flag_bearer::SemaphoreBuilder::fifo().closeable().with_state(Counter(1));
+/// let s = flag_bearer::Builder::fifo().closeable().with_state(Counter(1));
 ///
 /// // closing the semaphore makes all current and new acquire() calls return an error.
 /// s.close();
