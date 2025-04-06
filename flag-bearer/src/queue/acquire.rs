@@ -6,9 +6,9 @@ use core::{
 
 use pin_list::{Node, NodeData};
 
-use crate::{
-    FairOrder, IsCloseable, Permit, PinQueue, QueueState, Semaphore, SemaphoreState, Uncloseable,
-};
+use crate::{FairOrder, IsCloseable, Permit, QueueState, Semaphore, SemaphoreState, Uncloseable};
+
+use super::PinQueue;
 
 impl<S: SemaphoreState + ?Sized> Semaphore<S, Uncloseable> {
     /// Acquire a new permit fairly with the given parameters.
@@ -244,6 +244,71 @@ impl<S: SemaphoreState + ?Sized, C: IsCloseable> QueueState<S, C> {
 }
 
 /// The error returned by [`try_acquire`](Semaphore::try_acquire)
+///
+/// ### NoPermits
+///
+/// ```
+/// struct Counter(usize);
+///
+/// impl flag_bearer::SemaphoreState for Counter {
+///     type Params = ();
+///     type Permit = ();
+///
+///     fn acquire(&mut self, _: Self::Params) -> Result<Self::Permit, Self::Params> {
+///         if self.0 > 0 {
+///             self.0 -= 1;
+///             Ok(())
+///         } else {
+///             Err(())
+///         }
+///     }
+///
+///     fn release(&mut self, _: Self::Permit) {
+///         self.0 += 1;
+///     }
+/// }
+///
+/// let s = flag_bearer::SemaphoreBuilder::fifo().with_state(Counter(0));
+///
+/// match s.try_acquire(()) {
+///     Err(flag_bearer::TryAcquireError::NoPermits(_)) => {},
+///     _ => unreachable!(),
+/// }
+/// ```
+///
+/// ### Closed
+///
+/// ```
+/// struct Counter(usize);
+///
+/// impl flag_bearer::SemaphoreState for Counter {
+///     type Params = ();
+///     type Permit = ();
+///
+///     fn acquire(&mut self, _: Self::Params) -> Result<Self::Permit, Self::Params> {
+///         if self.0 > 0 {
+///             self.0 -= 1;
+///             Ok(())
+///         } else {
+///             Err(())
+///         }
+///     }
+///
+///     fn release(&mut self, _: Self::Permit) {
+///         self.0 += 1;
+///     }
+/// }
+///
+/// let s = flag_bearer::SemaphoreBuilder::fifo().closeable().with_state(Counter(1));
+///
+/// // closing the semaphore makes all current and new acquire() calls return an error.
+/// s.close();
+///
+/// match s.try_acquire(()) {
+///     Err(flag_bearer::TryAcquireError::Closed(_)) => {},
+///     _ => unreachable!(),
+/// }
+/// ```
 #[derive(Debug, PartialEq, Eq)]
 pub enum TryAcquireError<P, C: IsCloseable> {
     /// The semaphore had no permits to give out right now.
@@ -262,6 +327,37 @@ impl<P, C: IsCloseable> fmt::Display for TryAcquireError<P, C> {
 }
 
 /// The error returned by [`acquire`](Semaphore::acquire) if the semaphore was closed.
+///
+/// ```
+/// struct Counter(usize);
+///
+/// impl flag_bearer::SemaphoreState for Counter {
+///     type Params = ();
+///     type Permit = ();
+///
+///     fn acquire(&mut self, _: Self::Params) -> Result<Self::Permit, Self::Params> {
+///         if self.0 > 0 {
+///             self.0 -= 1;
+///             Ok(())
+///         } else {
+///             Err(())
+///         }
+///     }
+///
+///     fn release(&mut self, _: Self::Permit) {
+///         self.0 += 1;
+///     }
+/// }
+///
+/// # pollster::block_on(async move {
+/// let s = flag_bearer::SemaphoreBuilder::fifo().closeable().with_state(Counter(1));
+///
+/// // closing the semaphore makes all current and new acquire() calls return an error.
+/// s.close();
+///
+/// let _err = s.acquire(()).await.unwrap_err();
+/// # });
+/// ```
 #[non_exhaustive]
 #[derive(Debug, PartialEq, Eq)]
 pub struct AcquireError<P> {

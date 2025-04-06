@@ -94,29 +94,29 @@ mod semaphore {
 
     impl Permit<'_> {
         pub fn num_permits(&self) -> usize {
-            *self.0.permit()
+            *self.0
         }
 
         pub fn split(&mut self, n: usize) -> Option<Self> {
-            let this = self.0.permit().checked_sub(n)?;
-            *self.0.permit_mut() = this;
+            let this = self.0.checked_sub(n)?;
+            *self.0 = this;
             Some(Self(flag_bearer::Permit::out_of_thin_air(
-                self.0.semaphore(),
+                flag_bearer::Permit::semaphore(&self.0),
                 n,
             )))
         }
 
         pub fn merge(&mut self, other: Self) {
-            let a = self.0.semaphore() as *const _;
-            let b = other.0.semaphore() as *const _;
+            let a = flag_bearer::Permit::semaphore(&self.0) as *const _;
+            let b = flag_bearer::Permit::semaphore(&other.0) as *const _;
 
             assert_eq!(a, b, "semaphores of each permit should match");
 
-            *self.0.permit_mut() += other.0.take();
+            *self.0 += flag_bearer::Permit::take(other.0);
         }
 
         pub fn forget(self) {
-            self.0.take();
+            flag_bearer::Permit::take(self.0);
         }
     }
 }

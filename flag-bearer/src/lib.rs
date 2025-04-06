@@ -207,9 +207,11 @@
 //! ### A connection pool
 //!
 //! A connection pool can work quite like a semaphore sometimes. There's a limited number of connections
-//! and you don't want too many at one time.
+//! and you don't want too many at one time. Our [`SemaphoreState::Permit`]s don't need to be Plain-Old-Data,
+//! so we can use them to hold connection objects too.
 //!
-//! If you do support adding more connections, you may still use this semaphore state,
+//! This example still allows creating new connections on demand, if they are needed in high load cases, as well as re-creating
+//! connections if they fail.
 //!
 //! ```
 //! #[derive(Debug)]
@@ -248,14 +250,14 @@
 //! async fn acquire_conn(s: &flag_bearer::Semaphore<Pool>) -> flag_bearer::Permit<'_, Pool> {
 //!     let d = std::time::Duration::from_millis(200);
 //!     if let Ok(mut permit) = timeout(s.must_acquire(()), d).await {
-//!         if permit.permit_mut().check().await {
+//!         if permit.check().await {
 //!             // We acquired a permit, and the liveness check succeeded.
 //!             // Return the permit.
 //!             return permit;
 //!         }
 //!
 //!         // do not return this connection to the semaphore, as it is broken.
-//!         permit.take();
+//!         flag_bearer::Permit::take(permit);
 //!     }
 //!
 //!     // There was a timeout, or the connection liveness check failed.
@@ -271,10 +273,9 @@
 //! // performance.
 //! let semaphore = flag_bearer::SemaphoreBuilder::lifo().with_state(Pool::default());
 //!
-//! let mut conn_permit = acquire_conn(&semaphore).await;
+//! let mut conn = acquire_conn(&semaphore).await;
 //!
 //! // access the inner conn
-//! let conn = conn_permit.permit_mut();
 //! conn.query().await;
 //! # })
 //! ```
@@ -287,21 +288,23 @@
     clippy::undocumented_unsafe_blocks
 )]
 
-use core::{hint::unreachable_unchecked, marker::PhantomData, task::Waker};
+use core::marker::PhantomData;
 
 #[cfg(test)]
 extern crate std;
 
-use pin_list::PinList;
-
-mod acquire;
-pub use acquire::{AcquireError, TryAcquireError};
-
-mod drop_wrapper;
-use drop_wrapper::DropWrapper;
-
-mod mutex;
 use mutex::Mutex;
+use queue::QueueState;
+
+mod closeable;
+mod drop_wrapper;
+mod mutex;
+mod permit;
+mod queue;
+
+pub use closeable::{Closeable, IsCloseable, Uncloseable};
+pub use permit::Permit;
+pub use queue::acquire::{AcquireError, TryAcquireError};
 
 /// A Builder for [`Semaphore`]s.
 pub struct SemaphoreBuilder<C: IsCloseable = Uncloseable> {
@@ -432,12 +435,9 @@ pub struct Semaphore<S: SemaphoreState + ?Sized, C: IsCloseable = Uncloseable> {
 
 impl<S: SemaphoreState, C: IsCloseable> Semaphore<S, C> {
     fn new_inner(state: S, order: FairOrder) -> Self {
-        let state = QueueState {
-            state,
-            // Safety: during acquire, we ensure that nodes in this queue
-            // will never attempt to use a different queue to read the nodes.
-            queue: Ok(PinList::new(unsafe { pin_list::id::DebugChecked::new() })),
-        };
+        // Safety: during acquire, we ensure that nodes in this queue
+        // will never attempt to use a different queue to read the nodes.
+        let state = unsafe { QueueState::new(state) };
         Self {
             state: Mutex::new(state),
             order,
@@ -493,7 +493,7 @@ impl<S: SemaphoreState + ?Sized, C: IsCloseable> Semaphore<S, C> {
 
     /// Check if the semaphore is closed
     pub fn is_closed(&self) -> bool {
-        C::CLOSE && self.state.lock().queue.is_err()
+        C::CLOSE && self.state.lock().is_closed()
     }
 }
 
@@ -503,213 +503,7 @@ impl<S: SemaphoreState + ?Sized> Semaphore<S, Closeable> {
     /// All tasks currently waiting to acquire a token will immediately stop.
     /// No new acquire attempts will succeed.
     pub fn close(&self) {
-        // must hold lock while we drain the queue
-        let mut state = self.state.lock();
-
-        let Ok(queue) = &mut state.queue else {
-            return;
-        };
-
-        let mut cursor = queue.cursor_front_mut();
-        while cursor.remove_current_with_or(
-            |(params, waker)| {
-                waker.wake();
-
-                Err(params)
-            },
-            || Err(None),
-        ) {}
-
-        debug_assert!(queue.is_empty());
-
-        // It's important that we only mark the queue as closed when we have ensured that
-        // all linked nodes are removed.
-        // If we did this early, we could panic and not dequeue every node.
-        state.queue = Err(());
-    }
-}
-
-mod private {
-    pub trait Sealed {
-        const CLOSE: bool;
-        type Closed<P>;
-    }
-}
-
-/// Whether the semaphore is closeable
-pub trait IsCloseable: private::Sealed {
-    type AcquireError<P>;
-
-    #[doc(hidden)]
-    fn new_err<P>(params: P) -> Self::AcquireError<P>;
-    #[doc(hidden)]
-    fn map_err<P, R>(p: Self::Closed<P>, f: impl FnOnce(P) -> R) -> Self::AcquireError<R>;
-}
-
-/// Controls whether a [`Semaphore`] is closeable.
-pub enum Closeable {}
-
-/// Controls whether a [`Semaphore`] is not closeable.
-pub enum Uncloseable {}
-
-impl private::Sealed for Closeable {
-    const CLOSE: bool = true;
-    type Closed<P> = P;
-}
-
-impl IsCloseable for Closeable {
-    type AcquireError<P> = AcquireError<P>;
-
-    #[doc(hidden)]
-    fn new_err<P>(params: P) -> Self::AcquireError<P> {
-        AcquireError { params }
-    }
-    #[doc(hidden)]
-    fn map_err<P, R>(p: Self::Closed<P>, f: impl FnOnce(P) -> R) -> Self::AcquireError<R> {
-        AcquireError { params: f(p) }
-    }
-}
-
-impl private::Sealed for Uncloseable {
-    const CLOSE: bool = false;
-    type Closed<P> = Self;
-}
-
-impl IsCloseable for Uncloseable {
-    type AcquireError<P> = AcquireError<Uncloseable>;
-
-    #[doc(hidden)]
-    fn new_err<P>(_params: P) -> Self::AcquireError<P> {
-        unreachable!()
-    }
-    #[doc(hidden)]
-    fn map_err<P, R>(p: Self::Closed<P>, _f: impl FnOnce(P) -> R) -> Self::AcquireError<R> {
-        match p {}
-    }
-}
-
-impl core::fmt::Display for Uncloseable {
-    fn fmt(&self, _f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-        match *self {}
-    }
-}
-
-impl core::fmt::Debug for Uncloseable {
-    fn fmt(&self, _f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-        match *self {}
-    }
-}
-
-impl core::error::Error for Uncloseable {}
-
-// don't question the weird bounds here...
-struct QueueState<
-    S: SemaphoreState<Params = Params, Permit = Permit> + ?Sized,
-    C: IsCloseable,
-    Params = <S as SemaphoreState>::Params,
-    Permit = <S as SemaphoreState>::Permit,
-> {
-    #[allow(clippy::type_complexity)]
-    queue: Result<PinList<PinQueue<Params, Permit, C>>, C::Closed<()>>,
-    state: S,
-}
-
-type PinQueue<Params, Permit, C> = dyn pin_list::Types<
-        Id = pin_list::id::DebugChecked,
-        // Some(params), waker -> Pending
-        // None, waker -> Invalid state.
-        Protected = (Option<Params>, Waker),
-        // Ok(permit) -> Ready
-        // Err(Some(params)) -> Closed
-        // Err(None) -> Closed, Invalid state
-        Removed = Result<Permit, <C as private::Sealed>::Closed<Option<Params>>>,
-        Unprotected = (),
-    >;
-
-impl<S: SemaphoreState + ?Sized, C: IsCloseable> QueueState<S, C> {
-    #[inline]
-    fn check(&mut self) {
-        let Ok(queue) = &mut self.queue else { return };
-        let mut leader = queue.cursor_front_mut();
-        while let Some(p) = leader.protected_mut() {
-            let params = p.0.take().expect(
-                "params should be in place. possibly the SemaphoreState::acquire method panicked",
-            );
-            match self.state.acquire(params) {
-                Ok(permit) => match leader.remove_current(Ok(permit)) {
-                    Ok((_, waker)) => waker.wake(),
-                    // Safety: with protected_mut, we have just made sure it is in the list
-                    Err(_) => unsafe { unreachable_unchecked() },
-                },
-                Err(params) => {
-                    p.0 = Some(params);
-                    break;
-                }
-            }
-        }
-    }
-}
-
-/// The drop-guard for semaphore permits.
-/// Will ensure the permit is released when dropped.
-pub struct Permit<'a, S: SemaphoreState + ?Sized, C: IsCloseable = Uncloseable> {
-    inner: DropWrapper<SemWrapper<'a, S, C>>,
-}
-
-struct SemWrapper<'a, S: SemaphoreState + ?Sized, C: IsCloseable> {
-    sem: &'a Semaphore<S, C>,
-}
-
-impl<S: SemaphoreState + ?Sized, C: IsCloseable> drop_wrapper::Drop2 for SemWrapper<'_, S, C> {
-    type T = S::Permit;
-
-    fn drop(&mut self, permit: Self::T) {
-        self.sem.with_state(|s| s.release(permit));
-    }
-}
-
-impl<S: SemaphoreState + ?Sized, C: IsCloseable> core::fmt::Debug for Permit<'_, S, C>
-where
-    S::Permit: core::fmt::Debug,
-{
-    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-        f.debug_struct("Permit")
-            .field("permit", &self.inner.t)
-            .finish_non_exhaustive()
-    }
-}
-
-impl<'a, S: SemaphoreState + ?Sized, C: IsCloseable> Permit<'a, S, C> {
-    /// Construct a new permit out of thin air, no waiting is required.
-    ///
-    /// This violates the purpose of the semahpore, but is provided for convenience.
-    pub fn out_of_thin_air(sem: &'a Semaphore<S, C>, permit: S::Permit) -> Self {
-        Self {
-            inner: DropWrapper::new(SemWrapper { sem }, permit),
-        }
-    }
-
-    /// Get read access to the permit value
-    pub fn permit(&self) -> &S::Permit {
-        &self.inner.t
-    }
-
-    /// Get mut access to the permit value
-    ///
-    /// It is up to the caller to maintain any semaphore invariants
-    /// that might be violated when returning this permit.
-    pub fn permit_mut(&mut self) -> &mut S::Permit {
-        &mut self.inner.t
-    }
-
-    /// Get read access to the associated semaphore
-    pub fn semaphore(&self) -> &'a Semaphore<S, C> {
-        self.inner.s.sem
-    }
-
-    /// Do not release the permit to the semaphore.
-    pub fn take(self) -> S::Permit {
-        self.inner.take()
+        self.state.lock().close();
     }
 }
 
