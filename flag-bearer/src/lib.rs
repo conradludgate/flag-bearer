@@ -42,7 +42,7 @@
 //!
 //! ## Examples
 //!
-//! A Semaphore like `tokio::sync::Semaphore`:
+//! ### A Semaphore like `tokio::sync::Semaphore`
 //!
 //! ```
 //! #[derive(Debug)]
@@ -87,7 +87,13 @@
 //! # })
 //! ```
 //!
-//! A more complex usecase with the ability to update limits on demand:
+//! ### A more complex usecase with the ability to update limits on demand
+//!
+//! `tokio`'s Semaphore allows adding permits on demand, but it doesn't support removing permits.
+//! You have to `forget` the permits that are already acquired, and if you don't have those on hand,
+//! you will have to spawn a task to acquire them.
+//!
+//! With the following construction, we can define a state that allows removing permits at will.
 //!
 //! ```
 //! #[derive(Debug)]
@@ -141,7 +147,19 @@
 //! # })
 //! ```
 //!
-//! A LIFO semaphore which tracks multiple values at once:
+//! ### A LIFO semaphore which tracks multiple values at once
+//!
+//! Last-in, first-out is an unfair strategy of queueing, where the latest queued task
+//! will be the first one to get the permit. This might seem like a bad strategy, but
+//! if high latency is considered a failure in your applications, this can reduce
+//! the failure rate. In a FIFO setting, you might have a P50 = 50ms, P99 = 100ms.
+//! The same in a LIFO setting could be P50 = 10ms, P99 = 500ms. If 50ms half the time
+//! is too slow for your application, then switching to LIFO could help.
+//! <https://encore.dev/blog/queueing#lifo>
+//!
+//! Additionally to LIFO, Our [`SemaphoreState`] allows us to track multiple fields at once.
+//! Let's imagine we want to limit in-flight requests, as well as in-flight request body allocations.
+//! We can put the two counters in a single state object.
 //!
 //! ```
 //! #[derive(Debug)]
@@ -186,15 +204,29 @@
 //! # })
 //! ```
 //!
-//! A connection pool:
+//! ### A connection pool
+//!
+//! A connection pool can work quite like a semaphore sometimes. There's a limited number of connections
+//! and you don't want too many at one time.
+//!
+//! If you do support adding more connections, you may still use this semaphore state,
 //!
 //! ```
 //! #[derive(Debug)]
-//! struct Connection{
+//! struct Connection {
 //!     // ...
 //! }
 //!
-//! #[derive(Debug)]
+//! impl Connection {
+//!     /// creates a new conn
+//!     pub fn new() -> Self { Self {} }
+//!     /// checks the connection liveness
+//!     pub async fn check(&mut self) -> bool { true }
+//!     /// do something
+//!     pub async fn query(&mut self) {}
+//! }
+//!
+//! #[derive(Debug, Default)]
 //! struct Pool {
 //!     conns: Vec<Connection>,
 //! }
@@ -212,20 +244,38 @@
 //!     }
 //! }
 //!
-//! # pollster::block_on(async {
-//! // Create a new LIFO connection pool with 20 connections
-//! let semaphore = flag_bearer::SemaphoreBuilder::lifo().with_state(Pool {
-//!     conns: std::iter::repeat_with(|| Connection {}).take(20).collect(),
-//! });
+//! # async fn timeout<F: std::future::Future>(_f: F, _duration: std::time::Duration) -> Result<F::Output, ()> { Err(()) }
+//! async fn acquire_conn(s: &flag_bearer::Semaphore<Pool>) -> flag_bearer::Permit<'_, Pool> {
+//!     let d = std::time::Duration::from_millis(200);
+//!     if let Ok(mut permit) = timeout(s.must_acquire(()), d).await {
+//!         if permit.permit_mut().check().await {
+//!             // We acquired a permit, and the liveness check succeeded.
+//!             // Return the permit.
+//!             return permit;
+//!         }
 //!
-//! // acquire a permit for a request with 64KB
-//! let mut conn_permit = semaphore.must_acquire(()).await;
+//!         // do not return this connection to the semaphore, as it is broken.
+//!         permit.take();
+//!     }
+//!
+//!     // There was a timeout, or the connection liveness check failed.
+//!     // Create a new connection and permit.
+//!     let c = Connection::new();
+//!     flag_bearer::Permit::out_of_thin_air(&s, c)
+//! }
+//!
+//! # pollster::block_on(async {
+//! // Create a new LIFO connection pool.
+//! // We choose LIFO here because we create new connections on timeout, and LIFO is
+//! // more likely to have timeouts but on fewer tasks, which ends up improving our
+//! // performance.
+//! let semaphore = flag_bearer::SemaphoreBuilder::lifo().with_state(Pool::default());
+//!
+//! let mut conn_permit = acquire_conn(&semaphore).await;
 //!
 //! // access the inner conn
-//! let _conn = conn_permit.permit_mut();
-//!
-//! // create a conn on-demand:
-//! let mut _conn_permit2 = flag_bearer::Permit::out_of_thin_air(&semaphore, Connection {});
+//! let conn = conn_permit.permit_mut();
+//! conn.query().await;
 //! # })
 //! ```
 
