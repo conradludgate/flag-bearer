@@ -1,18 +1,13 @@
-use flag_bearer_mutex::lock_api::RawMutex;
-
-use crate::{
-    DefaultRawMutex, IsCloseable, Semaphore, SemaphoreState, Uncloseable, drop_wrapper::DropWrapper,
-};
+use crate::{IsCloseable, Semaphore, SemaphoreState, Uncloseable, drop_wrapper::DropWrapper};
 
 /// The drop-guard for semaphore permits.
 /// Will ensure the permit is released when dropped.
-pub struct Permit<'a, S, C = Uncloseable, R = DefaultRawMutex>
+pub struct Permit<'a, S, C = Uncloseable>
 where
     S: SemaphoreState + ?Sized,
     C: IsCloseable,
-    R: RawMutex,
 {
-    inner: DropWrapper<SemWrapper<'a, S, C, R>>,
+    inner: DropWrapper<SemWrapper<'a, S, C>>,
 }
 
 impl<S, C> core::fmt::Debug for Permit<'_, S, C>
@@ -49,11 +44,10 @@ where
     }
 }
 
-impl<'a, S, C, R> Permit<'a, S, C, R>
+impl<'a, S, C> Permit<'a, S, C>
 where
     S: SemaphoreState + ?Sized,
     C: IsCloseable,
-    R: RawMutex,
 {
     /// Construct a new permit out of thin air, no waiting is required.
     ///
@@ -61,14 +55,14 @@ where
     /// It can be used to introduce new permits to the semaphore if desired, or it can be
     /// paired with [`Permit::take`] for niche use-cases where the semaphore lifetime
     /// gets in the way.
-    pub fn out_of_thin_air(sem: &'a Semaphore<S, C, R>, permit: S::Permit) -> Self {
+    pub fn out_of_thin_air(sem: &'a Semaphore<S, C>, permit: S::Permit) -> Self {
         Self {
             inner: DropWrapper::new(SemWrapper { sem }, permit),
         }
     }
 
     /// Get access to the associated semaphore
-    pub fn semaphore(this: &Self) -> &'a Semaphore<S, C, R> {
+    pub fn semaphore(this: &Self) -> &'a Semaphore<S, C> {
         this.inner.s.sem
     }
 
@@ -78,12 +72,12 @@ where
     }
 }
 
-struct SemWrapper<'a, S: SemaphoreState + ?Sized, C: IsCloseable, R: RawMutex> {
-    sem: &'a Semaphore<S, C, R>,
+struct SemWrapper<'a, S: SemaphoreState + ?Sized, C: IsCloseable> {
+    sem: &'a Semaphore<S, C>,
 }
 
-impl<S: SemaphoreState + ?Sized, C: IsCloseable, R: RawMutex> crate::drop_wrapper::Drop2
-    for SemWrapper<'_, S, C, R>
+impl<S: SemaphoreState + ?Sized, C: IsCloseable> crate::drop_wrapper::Drop2
+    for SemWrapper<'_, S, C>
 {
     type T = S::Permit;
 

@@ -297,20 +297,22 @@ mod drop_wrapper;
 mod permit;
 
 pub use flag_bearer_core::SemaphoreState;
-pub use flag_bearer_mutex::RawMutex as DefaultRawMutex;
-use flag_bearer_mutex::lock_api::{Mutex, RawMutex};
+
 use flag_bearer_queue::{Acquire, FairOrder, QueueState, acquire::Fairness};
 pub use flag_bearer_queue::{AcquireError, Closeable, IsCloseable, TryAcquireError, Uncloseable};
+
 pub use permit::Permit;
 
+use flag_bearer_mutex::RawMutex as DefaultRawMutex;
+use flag_bearer_mutex::lock_api::Mutex;
+
 /// A Builder for [`Semaphore`]s.
-pub struct Builder<C = Uncloseable, R = DefaultRawMutex>
+pub struct Builder<C = Uncloseable>
 where
     C: IsCloseable,
-    R: RawMutex,
 {
     order: FairOrder,
-    closeable: PhantomData<(C, R)>,
+    closeable: PhantomData<C>,
 }
 
 impl Builder {
@@ -329,14 +331,9 @@ impl Builder {
             closeable: PhantomData,
         }
     }
-}
 
-impl<R> Builder<Uncloseable, R>
-where
-    R: RawMutex,
-{
     /// The semaphore this builder constructs will be closeable.
-    pub fn closeable(self) -> Builder<Closeable, R> {
+    pub fn closeable(self) -> Builder<Closeable> {
         Builder {
             order: self.order,
             closeable: PhantomData,
@@ -344,26 +341,12 @@ where
     }
 }
 
-impl<C> Builder<C, DefaultRawMutex>
+impl<C> Builder<C>
 where
     C: IsCloseable,
-{
-    /// The raw mutex implementation this semaphore will use
-    pub fn with_mutex<R: RawMutex>(self) -> Builder<C, R> {
-        Builder {
-            order: self.order,
-            closeable: PhantomData,
-        }
-    }
-}
-
-impl<C, R> Builder<C, R>
-where
-    C: IsCloseable,
-    R: RawMutex,
 {
     /// Build the [`Semaphore`] with the provided initial state.
-    pub fn with_state<S: SemaphoreState>(self, state: S) -> Semaphore<S, C, R> {
+    pub fn with_state<S: SemaphoreState>(self, state: S) -> Semaphore<S, C> {
         Semaphore::new_inner(state, self.order)
     }
 }
@@ -377,18 +360,16 @@ where
 /// The generics on this semaphore are as follows:
 /// * `S`: The [`SemaphoreState`] value that this semaphore is backed by.
 /// * `C`: A type-safe configuration value for whether [`Semaphore::close`] can be called, and whether [`Semaphore::acquire`] can fail.
-/// * `R`: A [`lock_api::RawMutex`] to configure the mutex implementation for this semaphore. This configuration is provided certain performance cases.
-pub struct Semaphore<S, C = Uncloseable, R = DefaultRawMutex>
+pub struct Semaphore<S, C = Uncloseable>
 where
     S: SemaphoreState + ?Sized,
     C: IsCloseable,
-    R: RawMutex,
 {
     order: FairOrder,
-    state: Mutex<R, QueueState<S, C>>,
+    state: Mutex<DefaultRawMutex, QueueState<S, C>>,
 }
 
-impl<S: SemaphoreState, C: IsCloseable, R: RawMutex> Semaphore<S, C, R> {
+impl<S: SemaphoreState, C: IsCloseable> Semaphore<S, C> {
     fn new_inner(state: S, order: FairOrder) -> Self {
         let state = QueueState::new(state);
         Self {
@@ -414,25 +395,23 @@ impl<S: SemaphoreState + core::fmt::Debug> core::fmt::Debug for Semaphore<S> {
     }
 }
 
-impl<S, R> Semaphore<S, Uncloseable, R>
+impl<S> Semaphore<S, Uncloseable>
 where
     S: SemaphoreState + ?Sized,
-    R: RawMutex,
 {
     /// Acquire a new permit fairly with the given parameters.
     ///
     /// If a permit is not immediately available, this task will
     /// join a queue.
-    pub async fn must_acquire(&self, params: S::Params) -> Permit<'_, S, Uncloseable, R> {
+    pub async fn must_acquire(&self, params: S::Params) -> Permit<'_, S, Uncloseable> {
         self.acquire(params).await.unwrap_or_else(|e| e.never())
     }
 }
 
-impl<S, C, R> Semaphore<S, C, R>
+impl<S, C> Semaphore<S, C>
 where
     S: SemaphoreState + ?Sized,
     C: IsCloseable,
-    R: RawMutex,
 {
     /// Acquire a new permit fairly with the given parameters.
     ///
@@ -445,7 +424,7 @@ where
     pub async fn acquire(
         &self,
         params: S::Params,
-    ) -> Result<Permit<'_, S, C, R>, C::AcquireError<S::Params>> {
+    ) -> Result<Permit<'_, S, C>, C::AcquireError<S::Params>> {
         let acquire = Acquire::new(&self.state, self.order, params);
         Ok(Permit::out_of_thin_air(self, acquire.await?))
     }
@@ -481,7 +460,7 @@ where
     pub fn try_acquire(
         &self,
         params: S::Params,
-    ) -> Result<Permit<'_, S, C, R>, TryAcquireError<S::Params, C>> {
+    ) -> Result<Permit<'_, S, C>, TryAcquireError<S::Params, C>> {
         let permit = self.try_acquire_inner(params, Fairness::Fair)?;
         Ok(Permit::out_of_thin_air(self, permit))
     }
@@ -500,17 +479,16 @@ where
     pub fn try_acquire_unfair(
         &self,
         params: S::Params,
-    ) -> Result<Permit<'_, S, C, R>, TryAcquireError<S::Params, C>> {
+    ) -> Result<Permit<'_, S, C>, TryAcquireError<S::Params, C>> {
         let permit = self.try_acquire_inner(params, Fairness::Unfair)?;
         Ok(Permit::out_of_thin_air(self, permit))
     }
 }
 
-impl<S, C, R> Semaphore<S, C, R>
+impl<S, C> Semaphore<S, C>
 where
     S: SemaphoreState + ?Sized,
     C: IsCloseable,
-    R: RawMutex,
 {
     /// Access the state with mutable access.
     ///
@@ -531,10 +509,9 @@ where
     }
 }
 
-impl<S, R> Semaphore<S, Closeable, R>
+impl<S> Semaphore<S, Closeable>
 where
     S: SemaphoreState + ?Sized,
-    R: RawMutex,
 {
     /// Close the semaphore.
     ///
