@@ -1,6 +1,8 @@
-use lock_api::RawMutex;
+use flag_bearer_mutex::lock_api::RawMutex;
 
-use crate::{drop_wrapper::DropWrapper, DefaultRawMutex, IsCloseable, Semaphore, SemaphoreState, Uncloseable};
+use crate::{
+    DefaultRawMutex, IsCloseable, Semaphore, SemaphoreState, Uncloseable, drop_wrapper::DropWrapper,
+};
 
 /// The drop-guard for semaphore permits.
 /// Will ensure the permit is released when dropped.

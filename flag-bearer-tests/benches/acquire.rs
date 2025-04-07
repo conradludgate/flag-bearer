@@ -1,9 +1,6 @@
 use std::{hint::black_box, thread::available_parallelism};
 
-use harness::async_bench;
-mod harness;
-
-mod semaphore;
+use flag_bearer_tests::bench::async_bench;
 
 fn main() {
     let t = available_parallelism().unwrap().get();
@@ -14,19 +11,19 @@ fn main() {
     let iters = 50;
 
     println!("flag_bearer[threads = {t}, permits = {slow}]:");
-    let semaphore = semaphore::Semaphore::new(slow);
+    let semaphore = flag_bearer_tests::Semaphore::new(slow);
     async_bench(t, rounds, iters, semaphore, async |s| {
         black_box(s.acquire().await);
     });
 
     println!("flag_bearer[threads = {t}, permits = {fast}]:");
-    let semaphore = semaphore::Semaphore::new(fast);
+    let semaphore = flag_bearer_tests::Semaphore::new(fast);
     async_bench(t, rounds, iters, semaphore, async |s| {
         black_box(s.acquire().await);
     });
 
     println!("flag_bearer[threads = 2, permits = 64]:");
-    let semaphore = semaphore::Semaphore::new(64);
+    let semaphore = flag_bearer_tests::Semaphore::new(64);
     async_bench(2, rounds, iters, semaphore, async |s| {
         black_box(s.acquire().await);
     });

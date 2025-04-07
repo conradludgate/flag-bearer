@@ -293,23 +293,15 @@ use core::marker::PhantomData;
 #[cfg(test)]
 extern crate std;
 
-use lock_api::RawMutex;
-use mutex::Mutex;
-use queue::{
-    QueueState,
-    acquire::{Acquire, Fairness},
-};
-
-mod closeable;
 mod drop_wrapper;
-mod mutex;
 mod permit;
-mod queue;
 
-pub use closeable::{Closeable, IsCloseable, Uncloseable};
-pub use mutex::DefaultRawMutex;
+pub use flag_bearer_core::SemaphoreState;
+pub use flag_bearer_mutex::RawMutex as DefaultRawMutex;
+use flag_bearer_mutex::lock_api::{Mutex, RawMutex};
+use flag_bearer_queue::{Acquire, FairOrder, QueueState, acquire::Fairness};
+pub use flag_bearer_queue::{AcquireError, Closeable, IsCloseable, TryAcquireError, Uncloseable};
 pub use permit::Permit;
-pub use queue::acquire::{AcquireError, TryAcquireError};
 
 /// A Builder for [`Semaphore`]s.
 pub struct Builder<C = Uncloseable, R = DefaultRawMutex>
@@ -376,57 +368,6 @@ where
     }
 }
 
-/// The trait defining how [`Semaphore`]s behave.
-///
-/// The usage of this state is as follows:
-/// ```
-/// # use flag_bearer::SemaphoreState;
-/// # use std::sync::Mutex;
-/// fn get_permit<S: SemaphoreState>(s: &Mutex<S>, mut params: S::Params) -> S::Permit {
-///     loop {
-///         let mut s = s.lock().unwrap();
-///         match s.acquire(params) {
-///             Ok(permit) => break permit,
-///             Err(p) => params = p,
-///         }
-///
-///         // sleep/spin/yield until time to try again
-///     }
-/// }
-///
-/// fn return_permit<S: SemaphoreState>(s: &Mutex<S>, permit: S::Permit) {
-///     s.lock().unwrap().release(permit);
-/// }
-/// ```
-///
-/// This is + async queueing is implemented for you by [`Semaphore`], with RAII returning via [`Permit`].
-pub trait SemaphoreState {
-    /// What type is used to request permits.
-    ///
-    /// An example of this could be `usize` for a counting semaphore,
-    /// if you want to support `acquire_many` type requests.
-    type Params;
-
-    /// The type representing the current permit allocation.
-    ///
-    /// If you have a counting semaphore, this could be the number
-    /// of permits acquired. If this is more like a connection pool,
-    /// this could be a specific object allocation.
-    type Permit;
-
-    /// Acquire a permit given the params.
-    ///
-    /// If a permit could not be acquired with the params, return an error with the
-    /// original params back.
-    fn acquire(&mut self, params: Self::Params) -> Result<Self::Permit, Self::Params>;
-
-    /// Return the permit back to the semaphore.
-    ///
-    /// Note: This is not guaranteed to be called for every acquire call.
-    /// Permits can be modified or forgotten, or created at will.
-    fn release(&mut self, permit: Self::Permit);
-}
-
 /// Generic semaphore performing asynchronous permit acquisition.
 ///
 /// See the [top level docs](crate) for information about semaphores.
@@ -454,22 +395,6 @@ impl<S: SemaphoreState, C: IsCloseable, R: RawMutex> Semaphore<S, C, R> {
             state: Mutex::new(state),
             order,
         }
-    }
-}
-
-#[derive(Debug, Clone, Copy)]
-enum FairOrder {
-    /// Last in, first out.
-    /// Increases tail latencies, but can have better average performance.
-    Lifo,
-    /// First in, first out.
-    /// Fairer option, but can have cascading failures if queue processing is slow.
-    Fifo,
-}
-
-impl FairOrder {
-    fn is_lifo(&self) -> bool {
-        matches!(self, FairOrder::Lifo)
     }
 }
 
@@ -652,37 +577,5 @@ mod test {
         assert!(!s.is_closed());
         s.close();
         assert!(s.is_closed());
-    }
-
-    #[derive(Debug)]
-    struct NeverSucceeds;
-
-    impl crate::SemaphoreState for NeverSucceeds {
-        type Params = ();
-        type Permit = ();
-
-        fn acquire(&mut self, _params: Self::Params) -> Result<Self::Permit, Self::Params> {
-            Err(())
-        }
-
-        fn release(&mut self, _permit: Self::Permit) {}
-    }
-
-    #[cfg(loom)]
-    #[test]
-    fn concurrent_closed() {
-        loom::model(|| {
-            use std::sync::Arc;
-            let s = Arc::new(crate::Builder::fifo().closeable().with_state(NeverSucceeds));
-
-            let s2 = s.clone();
-            let handle = loom::thread::spawn(move || {
-                loom::future::block_on(async move { s2.acquire(()).await.unwrap_err() })
-            });
-
-            s.close();
-
-            handle.join().unwrap();
-        });
     }
 }

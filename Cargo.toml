@@ -1,3 +1,9 @@
 [workspace]
-members = ["flag-bearer", "flag-bearer-tests"]
+members = [
+    "flag-bearer",
+    "flag-bearer-core",
+    "flag-bearer-mutex",
+    "flag-bearer-queue",
+    "flag-bearer-tests",
+]
 resolver = "2"

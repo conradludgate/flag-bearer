@@ -1,0 +1,25 @@
+[package]
+name = "flag-bearer-queue"
+version = "0.1.0-rc.6"
+edition = "2024"
+license = "Apache-2.0 OR MIT"
+description = "Generic async semaphores"
+repository = "https://github.com/conradludgate/flag-bearer"
+
+[dependencies]
+flag-bearer-core = { version = "0.1.0-rc.6", path = "../flag-bearer-core" }
+pin-list = { version = "0.1", default-features = false }
+pin-project-lite = "0.2"
+cfg-if = "1"
+lock_api = "0.4"
+
+[dev-dependencies]
+pollster = "0.4"
+flag-bearer = { version = "0.1.0-rc.6", path = "../flag-bearer" }
+
+[target.'cfg(loom)'.dev-dependencies]
+loom = { version = "0.7.2", features = ["futures"] }
+parking_lot = "0.12"
+
+[lints.rust]
+unexpected_cfgs = { level = "allow", check-cfg = ['cfg(loom)'] }

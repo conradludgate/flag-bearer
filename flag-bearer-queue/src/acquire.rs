@@ -13,7 +13,7 @@ use crate::{FairOrder, IsCloseable, QueueState, SemaphoreState, Uncloseable};
 use super::PinQueue;
 
 pin_project_lite::pin_project! {
-    pub(crate) struct Acquire<'a, S, C, R>
+    pub struct Acquire<'a, S, C, R>
     where
         S: ?Sized,
         S: SemaphoreState,
@@ -63,7 +63,7 @@ pin_project_lite::pin_project! {
 }
 
 impl<'a, S: SemaphoreState + ?Sized, C: IsCloseable, R: RawMutex> Acquire<'a, S, C, R> {
-    pub(crate) fn new(
+    pub fn new(
         state: &'a Mutex<R, QueueState<S, C>>,
         order: FairOrder,
         params: S::Params,
@@ -133,7 +133,7 @@ impl<S: SemaphoreState + ?Sized, C: IsCloseable, R: RawMutex> Future for Acquire
     }
 }
 
-pub(crate) enum Fairness {
+pub enum Fairness {
     Fair,
     Unfair,
 }
@@ -146,7 +146,7 @@ impl Fairness {
 
 impl<S: SemaphoreState + ?Sized, C: IsCloseable> QueueState<S, C> {
     #[inline]
-    pub(crate) fn unlinked_try_acquire(
+    pub fn unlinked_try_acquire(
         &mut self,
         params: S::Params,
         order: FairOrder,

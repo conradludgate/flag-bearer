@@ -1,13 +1,46 @@
+#![no_std]
+#![warn(
+    unsafe_op_in_unsafe_fn,
+    clippy::missing_safety_doc,
+    clippy::multiple_unsafe_ops_per_block,
+    clippy::undocumented_unsafe_blocks
+)]
+
+#[cfg(test)]
+extern crate std;
+
 use core::{hint::unreachable_unchecked, task::Waker};
 
+use flag_bearer_core::SemaphoreState;
 use pin_list::PinList;
 
-use crate::{Closeable, IsCloseable, SemaphoreState, closeable};
-
 pub mod acquire;
+mod closeable;
+mod mutex;
+
+pub use acquire::{Acquire, AcquireError, TryAcquireError};
+pub use closeable::{Closeable, IsCloseable, Uncloseable};
+use mutex::Mutex;
+
+#[derive(Debug, Clone, Copy)]
+#[non_exhaustive]
+pub enum FairOrder {
+    /// Last in, first out.
+    /// Increases tail latencies, but can have better average performance.
+    Lifo,
+    /// First in, first out.
+    /// Fairer option, but can have cascading failures if queue processing is slow.
+    Fifo,
+}
+
+impl FairOrder {
+    fn is_lifo(&self) -> bool {
+        matches!(self, FairOrder::Lifo)
+    }
+}
 
 // don't question the weird bounds here...
-pub(crate) struct QueueState<
+pub struct QueueState<
     S: SemaphoreState<Params = Params, Permit = Permit> + ?Sized,
     C: IsCloseable,
     Params = <S as SemaphoreState>::Params,
@@ -15,7 +48,7 @@ pub(crate) struct QueueState<
 > {
     #[allow(clippy::type_complexity)]
     queue: Result<PinList<PinQueue<Params, Permit, C>>, C::Closed<()>>,
-    pub(crate) state: S,
+    pub state: S,
 }
 
 type PinQueue<Params, Permit, C> = dyn pin_list::Types<
@@ -37,7 +70,7 @@ type PinQueue<Params, Permit, C> = dyn pin_list::Types<
     >;
 
 impl<S: SemaphoreState, C: IsCloseable> QueueState<S, C> {
-    pub(crate) fn new(state: S) -> Self {
+    pub fn new(state: S) -> Self {
         Self {
             state,
             // Safety: during acquire, we ensure that nodes in this queue
@@ -49,7 +82,7 @@ impl<S: SemaphoreState, C: IsCloseable> QueueState<S, C> {
 
 impl<S: SemaphoreState + ?Sized, C: IsCloseable> QueueState<S, C> {
     #[inline]
-    pub(crate) fn check(&mut self) {
+    pub fn check(&mut self) {
         let Ok(queue) = &mut self.queue else { return };
         let mut leader = queue.cursor_front_mut();
         while let Some(p) = leader.protected_mut() {
@@ -71,7 +104,7 @@ impl<S: SemaphoreState + ?Sized, C: IsCloseable> QueueState<S, C> {
     }
 
     /// Check if the queue is closed
-    pub(crate) fn is_closed(&self) -> bool {
+    pub fn is_closed(&self) -> bool {
         self.queue.is_err()
     }
 }
@@ -98,5 +131,48 @@ impl<S: SemaphoreState + ?Sized> QueueState<S, Closeable> {
         // all linked nodes are removed.
         // If we did this early, we could panic and not dequeue every node.
         self.queue = Err(());
+    }
+}
+
+#[cfg(all(test, loom))]
+mod loom_tests {
+    use crate::{Acquire, Closeable, QueueState};
+
+    #[derive(Debug)]
+    struct NeverSucceeds;
+
+    impl crate::SemaphoreState for NeverSucceeds {
+        type Params = ();
+        type Permit = ();
+
+        fn acquire(&mut self, _params: Self::Params) -> Result<Self::Permit, Self::Params> {
+            Err(())
+        }
+
+        fn release(&mut self, _permit: Self::Permit) {}
+    }
+
+    #[test]
+    fn concurrent_closed() {
+        loom::model(|| {
+            use std::sync::Arc;
+
+            let s = Arc::new(crate::Mutex::<parking_lot::RawMutex, _>::new(
+                QueueState::<NeverSucceeds, Closeable>::new(NeverSucceeds),
+            ));
+
+            let s2 = s.clone();
+            let handle = loom::thread::spawn(move || {
+                loom::future::block_on(async move {
+                    Acquire::new(&*s2, crate::FairOrder::Fifo, ())
+                        .await
+                        .unwrap_err()
+                })
+            });
+
+            s.lock().close();
+
+            handle.join().unwrap();
+        });
     }
 }
