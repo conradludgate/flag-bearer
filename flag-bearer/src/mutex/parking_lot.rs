@@ -1,1 +1,1 @@
-pub use parking_lot::Mutex;
+pub use parking_lot::RawMutex;

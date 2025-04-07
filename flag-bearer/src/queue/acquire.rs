@@ -4,37 +4,42 @@ use core::{
     task::{Context, Poll},
 };
 
+use crate::Mutex;
+use lock_api::RawMutex;
 use pin_list::{Node, NodeData};
 
-use crate::{FairOrder, IsCloseable, QueueState, Semaphore, SemaphoreState, Uncloseable};
+use crate::{FairOrder, IsCloseable, QueueState, SemaphoreState, Uncloseable};
 
 use super::PinQueue;
 
 pin_project_lite::pin_project! {
-    pub(crate) struct Acquire<'a, S, C>
+    pub(crate) struct Acquire<'a, S, C, R>
     where
         S: ?Sized,
         S: SemaphoreState,
         C: IsCloseable,
+        R: RawMutex,
     {
         #[pin]
         node: Node<PinQueue<S::Params, S::Permit, C>>,
-        sem: &'a Semaphore<S, C>,
+        order: FairOrder,
+        state: &'a Mutex<R, QueueState<S, C>>,
         params: Option<S::Params>,
     }
 
-    impl<S, C> PinnedDrop for Acquire<'_, S, C>
+    impl<S, C, R> PinnedDrop for Acquire<'_, S, C, R>
     where
         S: ?Sized,
         S: SemaphoreState,
         C: IsCloseable,
+        R: RawMutex,
     {
         fn drop(this: Pin<&mut Self>) {
             let this = this.project();
             let Some(node) = this.node.initialized_mut() else {
                 return;
             };
-            let mut state = this.sem.state.lock();
+            let mut state = this.state.lock();
             match &mut state.queue {
                 Ok(queue) => {
                     let (data, _unprotected) = node.reset(queue);
@@ -57,29 +62,34 @@ pin_project_lite::pin_project! {
     }
 }
 
-impl<'a, S: SemaphoreState + ?Sized, C: IsCloseable> Acquire<'a, S, C> {
-    pub(crate) fn new(sem: &'a Semaphore<S, C>, params: S::Params) -> Self {
+impl<'a, S: SemaphoreState + ?Sized, C: IsCloseable, R: RawMutex> Acquire<'a, S, C, R> {
+    pub(crate) fn new(
+        state: &'a Mutex<R, QueueState<S, C>>,
+        order: FairOrder,
+        params: S::Params,
+    ) -> Self {
         Self {
             node: Node::new(),
-            sem,
+            order,
+            state,
             params: Some(params),
         }
     }
 }
 
-impl<S: SemaphoreState + ?Sized, C: IsCloseable> Future for Acquire<'_, S, C> {
+impl<S: SemaphoreState + ?Sized, C: IsCloseable, R: RawMutex> Future for Acquire<'_, S, C, R> {
     type Output = Result<S::Permit, C::AcquireError<S::Params>>;
 
     fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
         let mut this = self.project();
-        let mut state = this.sem.state.lock();
+        let mut state = this.state.lock();
 
         let Some(init) = this.node.as_mut().initialized_mut() else {
             // first time polling.
             let params = this.params.take().unwrap();
             let node = this.node.as_mut();
 
-            match state.unlinked_try_acquire(params, this.sem.order, Fairness::Fair) {
+            match state.unlinked_try_acquire(params, *this.order, Fairness::Fair) {
                 Ok(permit) => return Poll::Ready(Ok(permit)),
                 Err(TryAcquireError::Closed(params)) => return Poll::Ready(Err(params)),
                 Err(TryAcquireError::NoPermits(params)) => {
@@ -92,7 +102,7 @@ impl<S: SemaphoreState + ?Sized, C: IsCloseable> Future for Acquire<'_, S, C> {
 
                     // no permit or we are not the leader, so we register into the queue.
                     let waker = cx.waker().clone();
-                    match this.sem.order {
+                    match *this.order {
                         FairOrder::Lifo => queue.push_front(node, (Some(params), waker), ()),
                         FairOrder::Fifo => queue.push_back(node, (Some(params), waker), ()),
                     };

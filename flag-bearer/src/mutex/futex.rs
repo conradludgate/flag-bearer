@@ -3,8 +3,6 @@ use core::sync::atomic::{
     Ordering::{Acquire, Relaxed, Release},
 };
 
-pub type Mutex<T> = lock_api::Mutex<RawMutex, T>;
-
 const UNLOCKED: u32 = 0;
 const LOCKED: u32 = 1; // locked, no other threads waiting
 const CONTENDED: u32 = 2; // locked, and other threads waiting (contended)
