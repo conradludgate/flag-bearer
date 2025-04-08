@@ -1,4 +1,4 @@
-use crate::AcquireError;
+use crate::acquire::AcquireError;
 
 pub(crate) mod private {
     pub trait Sealed {
@@ -9,7 +9,7 @@ pub(crate) mod private {
 
 /// Whether the semaphore is closeable
 pub trait IsCloseable: private::Sealed {
-    /// The error returned during [`Semaphore::acquire`](crate::Semaphore::acquire).
+    /// The error returned by [`acquire`](crate::acquire::Acquire).
     /// It will be a variant of [`AcquireError`].
     ///
     /// * [`Closeable`] semaphores return a [`AcquireError<P>`].
@@ -22,10 +22,10 @@ pub trait IsCloseable: private::Sealed {
     fn map_err<P, R>(p: Self::Closed<P>, f: impl FnOnce(P) -> R) -> Self::AcquireError<R>;
 }
 
-/// Controls whether a [`Semaphore`](crate::Semaphore) is closeable.
+/// Controls whether the [`SemaphoreQueue`](crate::SemaphoreQueue) is closeable.
 pub enum Closeable {}
 
-/// Controls whether a [`Semaphore`](crate::Semaphore) is not closeable.
+/// Controls whether the [`SemaphoreQueue`](crate::SemaphoreQueue) is not closeable.
 pub enum Uncloseable {}
 
 impl private::Sealed for Closeable {

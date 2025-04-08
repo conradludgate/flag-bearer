@@ -9,5 +9,3 @@ repository = "https://github.com/conradludgate/flag-bearer"
 [dependencies]
 
 [dev-dependencies]
-flag-bearer = { version = "0.1.0-rc.6", path = "../flag-bearer" }
-pollster = "0.4"

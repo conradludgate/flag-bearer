@@ -4,15 +4,18 @@ use core::{
     task::{Context, Poll},
 };
 
-use crate::Mutex;
 use lock_api::RawMutex;
 use pin_list::{Node, NodeData};
 
-use crate::{FairOrder, IsCloseable, QueueState, SemaphoreState, Uncloseable};
+use crate::closeable::{IsCloseable, Uncloseable};
+use crate::{SemaphoreQueue, SemaphoreState};
 
 use super::PinQueue;
 
+use crate::loom::Mutex;
+
 pin_project_lite::pin_project! {
+    /// A [`Future`] that acquires a permit from a [`SemaphoreQueue`].
     pub struct Acquire<'a, S, C, R>
     where
         S: ?Sized,
@@ -23,7 +26,7 @@ pin_project_lite::pin_project! {
         #[pin]
         node: Node<PinQueue<S::Params, S::Permit, C>>,
         order: FairOrder,
-        state: &'a Mutex<R, QueueState<S, C>>,
+        state: &'a Mutex<R, SemaphoreQueue<S, C>>,
         params: Option<S::Params>,
     }
 
@@ -62,21 +65,6 @@ pin_project_lite::pin_project! {
     }
 }
 
-impl<'a, S: SemaphoreState + ?Sized, C: IsCloseable, R: RawMutex> Acquire<'a, S, C, R> {
-    pub fn new(
-        state: &'a Mutex<R, QueueState<S, C>>,
-        order: FairOrder,
-        params: S::Params,
-    ) -> Self {
-        Self {
-            node: Node::new(),
-            order,
-            state,
-            params: Some(params),
-        }
-    }
-}
-
 impl<S: SemaphoreState + ?Sized, C: IsCloseable, R: RawMutex> Future for Acquire<'_, S, C, R> {
     type Output = Result<S::Permit, C::AcquireError<S::Params>>;
 
@@ -89,7 +77,7 @@ impl<S: SemaphoreState + ?Sized, C: IsCloseable, R: RawMutex> Future for Acquire
             let params = this.params.take().unwrap();
             let node = this.node.as_mut();
 
-            match state.unlinked_try_acquire(params, *this.order, Fairness::Fair) {
+            match state.try_acquire(params, Fairness::Fair(*this.order)) {
                 Ok(permit) => return Poll::Ready(Ok(permit)),
                 Err(TryAcquireError::Closed(params)) => return Poll::Ready(Err(params)),
                 Err(TryAcquireError::NoPermits(params)) => {
@@ -133,23 +121,53 @@ impl<S: SemaphoreState + ?Sized, C: IsCloseable, R: RawMutex> Future for Acquire
     }
 }
 
+#[derive(Debug, Clone, Copy)]
+#[non_exhaustive]
+/// The order of which [`Acquire`] should enter the queue.
+pub enum FairOrder {
+    /// Last in, first out.
+    /// Increases tail latencies, but can have better average performance.
+    Lifo,
+    /// First in, first out.
+    /// Fairer option, but can have cascading failures if queue processing is slow.
+    Fifo,
+}
+
+#[derive(Debug, Clone, Copy)]
+#[non_exhaustive]
+/// Which fairness property [`SemaphoreQueue::try_acquire`] should respect
 pub enum Fairness {
-    Fair,
+    Fair(FairOrder),
     Unfair,
 }
 
-impl Fairness {
-    fn is_unfair(&self) -> bool {
-        matches!(self, Fairness::Unfair)
-    }
-}
-
-impl<S: SemaphoreState + ?Sized, C: IsCloseable> QueueState<S, C> {
+impl<S: SemaphoreState + ?Sized, C: IsCloseable> SemaphoreQueue<S, C> {
+    /// Acquire a permit, or join the queue if not currently available.
+    ///
+    /// * If the order is [`FairOrder::Lifo`], then we enqueue at the front of the queue.
+    /// * If the order is [`FairOrder::Fifo`], then we enqueue at the back of the queue.
     #[inline]
-    pub fn unlinked_try_acquire(
-        &mut self,
+    pub fn acquire<R: RawMutex>(
+        this: &Mutex<R, Self>,
         params: S::Params,
         order: FairOrder,
+    ) -> Acquire<'_, S, C, R> {
+        Acquire {
+            node: Node::new(),
+            order,
+            state: this,
+            params: Some(params),
+        }
+    }
+
+    /// Try acquire a permit without joining the queue.
+    ///
+    /// * If the fairness is [`Fairness::Unfair`], or [`Fairness::Fair(FairOrder::Lifo)`](FairOrder::Lifo), then we always try acquire a permit.
+    /// * If the fairness is [`Fairness::Fair(FairOrder::Fifo)`](FairOrder::Fifo), then we only try acquire a permit if the queue is empty.
+    #[inline]
+    pub fn try_acquire(
+        &mut self,
+        params: S::Params,
         fairness: Fairness,
     ) -> Result<S::Permit, TryAcquireError<S::Params, C>> {
         let queue = match &mut self.queue {
@@ -159,88 +177,26 @@ impl<S: SemaphoreState + ?Sized, C: IsCloseable> QueueState<S, C> {
             }
         };
 
-        // if last-in-first-out, we are the last in and thus the leader.
-        // if first-in-first-out, we are only the leader if the queue is empty.
-        let is_leader = fairness.is_unfair() || order.is_lifo() || queue.is_empty();
+        let is_leader = match fairness {
+            // if first-in-first-out, we are only the leader if the queue is empty.
+            Fairness::Fair(FairOrder::Fifo) => queue.is_empty(),
+            // if last-in-first-out, we are the last in and thus the leader.
+            Fairness::Fair(FairOrder::Lifo) => true,
+            // if unfair, then we don't care who the leader is.
+            Fairness::Unfair => true,
+        };
 
-        // if we are the leader, try and acquire a permit.
-        if is_leader {
-            match self.state.acquire(params) {
-                Ok(permit) => Ok(permit),
-                Err(p) => Err(TryAcquireError::NoPermits(p)),
-            }
-        } else {
-            Err(TryAcquireError::NoPermits(params))
+        if !is_leader {
+            return Err(TryAcquireError::NoPermits(params));
+        }
+
+        match self.state.acquire(params) {
+            Ok(permit) => Ok(permit),
+            Err(p) => Err(TryAcquireError::NoPermits(p)),
         }
     }
 }
 
-/// The error returned by [`try_acquire`](Semaphore::try_acquire)
-///
-/// ### NoPermits
-///
-/// ```
-/// struct Counter(usize);
-///
-/// impl flag_bearer::SemaphoreState for Counter {
-///     type Params = ();
-///     type Permit = ();
-///
-///     fn acquire(&mut self, _: Self::Params) -> Result<Self::Permit, Self::Params> {
-///         if self.0 > 0 {
-///             self.0 -= 1;
-///             Ok(())
-///         } else {
-///             Err(())
-///         }
-///     }
-///
-///     fn release(&mut self, _: Self::Permit) {
-///         self.0 += 1;
-///     }
-/// }
-///
-/// let s = flag_bearer::Builder::fifo().with_state(Counter(0));
-///
-/// match s.try_acquire(()) {
-///     Err(flag_bearer::TryAcquireError::NoPermits(_)) => {},
-///     _ => unreachable!(),
-/// }
-/// ```
-///
-/// ### Closed
-///
-/// ```
-/// struct Counter(usize);
-///
-/// impl flag_bearer::SemaphoreState for Counter {
-///     type Params = ();
-///     type Permit = ();
-///
-///     fn acquire(&mut self, _: Self::Params) -> Result<Self::Permit, Self::Params> {
-///         if self.0 > 0 {
-///             self.0 -= 1;
-///             Ok(())
-///         } else {
-///             Err(())
-///         }
-///     }
-///
-///     fn release(&mut self, _: Self::Permit) {
-///         self.0 += 1;
-///     }
-/// }
-///
-/// let s = flag_bearer::Builder::fifo().closeable().with_state(Counter(1));
-///
-/// // closing the semaphore makes all current and new acquire() calls return an error.
-/// s.close();
-///
-/// match s.try_acquire(()) {
-///     Err(flag_bearer::TryAcquireError::Closed(_)) => {},
-///     _ => unreachable!(),
-/// }
-/// ```
 #[derive(Debug, PartialEq, Eq)]
 pub enum TryAcquireError<P, C: IsCloseable> {
     /// The semaphore had no permits to give out right now.
@@ -258,7 +214,7 @@ impl<P, C: IsCloseable> fmt::Display for TryAcquireError<P, C> {
     }
 }
 
-/// The error returned by [`acquire`](Semaphore::acquire) if the semaphore was closed.
+/// The error returned by [`Acquire`] if the semaphore queue was closed.
 ///
 /// ```
 /// struct Counter(usize);
@@ -298,7 +254,7 @@ pub struct AcquireError<P> {
 }
 
 impl AcquireError<Uncloseable> {
-    /// Since the [`Semaphore`] is [`Uncloseable`], there can
+    /// Since the [`SemaphoreQueue`] is [`Uncloseable`], there can
     /// never be an acquire error. This allows for unwrapping with type-safety.
     pub fn never(self) -> ! {
         match self.params {}

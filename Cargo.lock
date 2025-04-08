@@ -123,10 +123,6 @@ dependencies = [
 [[package]]
 name = "flag-bearer-core"
 version = "0.1.0-rc.6"
-dependencies = [
- "flag-bearer",
- "pollster",
-]
 
 [[package]]
 name = "flag-bearer-mutex"

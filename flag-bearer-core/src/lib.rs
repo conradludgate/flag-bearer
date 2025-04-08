@@ -1,16 +1,11 @@
 #![no_std]
-#![warn(
-    unsafe_op_in_unsafe_fn,
-    clippy::missing_safety_doc,
-    clippy::multiple_unsafe_ops_per_block,
-    clippy::undocumented_unsafe_blocks
-)]
+#![deny(unsafe_code)]
 
-/// The trait defining how [`Semaphore`]s behave.
+/// The trait defining how semaphores behave.
 ///
 /// The usage of this state is as follows:
 /// ```
-/// # use flag_bearer::SemaphoreState;
+/// # use flag_bearer_core::SemaphoreState;
 /// # use std::sync::Mutex;
 /// fn get_permit<S: SemaphoreState>(s: &Mutex<S>, mut params: S::Params) -> S::Permit {
 ///     loop {
@@ -28,8 +23,6 @@
 ///     s.lock().unwrap().release(permit);
 /// }
 /// ```
-///
-/// This is + async queueing is implemented for you by [`Semaphore`], with RAII returning via [`Permit`].
 pub trait SemaphoreState {
     /// What type is used to request permits.
     ///

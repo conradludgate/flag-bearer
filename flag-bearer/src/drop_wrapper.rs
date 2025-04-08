@@ -1,4 +1,5 @@
 //! Jank proof-of-concept for a type that can take owned values during drop.
+#![allow(unsafe_code)]
 
 use core::mem::ManuallyDrop;
 

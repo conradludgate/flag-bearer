@@ -11,36 +11,17 @@ extern crate std;
 
 use core::{hint::unreachable_unchecked, task::Waker};
 
+use closeable::{Closeable, IsCloseable};
 use flag_bearer_core::SemaphoreState;
 use pin_list::PinList;
 
 pub mod acquire;
-mod closeable;
-mod mutex;
+pub mod closeable;
 
-pub use acquire::{Acquire, AcquireError, TryAcquireError};
-pub use closeable::{Closeable, IsCloseable, Uncloseable};
-use mutex::Mutex;
-
-#[derive(Debug, Clone, Copy)]
-#[non_exhaustive]
-pub enum FairOrder {
-    /// Last in, first out.
-    /// Increases tail latencies, but can have better average performance.
-    Lifo,
-    /// First in, first out.
-    /// Fairer option, but can have cascading failures if queue processing is slow.
-    Fifo,
-}
-
-impl FairOrder {
-    fn is_lifo(&self) -> bool {
-        matches!(self, FairOrder::Lifo)
-    }
-}
+mod loom;
 
 // don't question the weird bounds here...
-pub struct QueueState<
+pub struct SemaphoreQueue<
     S: SemaphoreState<Params = Params, Permit = Permit> + ?Sized,
     C: IsCloseable,
     Params = <S as SemaphoreState>::Params,
@@ -69,7 +50,7 @@ type PinQueue<Params, Permit, C> = dyn pin_list::Types<
         Unprotected = (),
     >;
 
-impl<S: SemaphoreState, C: IsCloseable> QueueState<S, C> {
+impl<S: SemaphoreState, C: IsCloseable> SemaphoreQueue<S, C> {
     pub fn new(state: S) -> Self {
         Self {
             state,
@@ -80,7 +61,7 @@ impl<S: SemaphoreState, C: IsCloseable> QueueState<S, C> {
     }
 }
 
-impl<S: SemaphoreState + ?Sized, C: IsCloseable> QueueState<S, C> {
+impl<S: SemaphoreState + ?Sized, C: IsCloseable> SemaphoreQueue<S, C> {
     #[inline]
     pub fn check(&mut self) {
         let Ok(queue) = &mut self.queue else { return };
@@ -109,7 +90,7 @@ impl<S: SemaphoreState + ?Sized, C: IsCloseable> QueueState<S, C> {
     }
 }
 
-impl<S: SemaphoreState + ?Sized> QueueState<S, Closeable> {
+impl<S: SemaphoreState + ?Sized> SemaphoreQueue<S, Closeable> {
     pub fn close(&mut self) {
         let Ok(queue) = &mut self.queue else {
             return;
@@ -136,7 +117,7 @@ impl<S: SemaphoreState + ?Sized> QueueState<S, Closeable> {
 
 #[cfg(all(test, loom))]
 mod loom_tests {
-    use crate::{Acquire, Closeable, QueueState};
+    use crate::{SemaphoreQueue, closeable::Closeable};
 
     #[derive(Debug)]
     struct NeverSucceeds;
@@ -157,14 +138,14 @@ mod loom_tests {
         loom::model(|| {
             use std::sync::Arc;
 
-            let s = Arc::new(crate::Mutex::<parking_lot::RawMutex, _>::new(
-                QueueState::<NeverSucceeds, Closeable>::new(NeverSucceeds),
+            let s = Arc::new(crate::loom::Mutex::<parking_lot::RawMutex, _>::new(
+                SemaphoreQueue::<NeverSucceeds, Closeable>::new(NeverSucceeds),
             ));
 
             let s2 = s.clone();
             let handle = loom::thread::spawn(move || {
                 loom::future::block_on(async move {
-                    Acquire::new(&*s2, crate::FairOrder::Fifo, ())
+                    SemaphoreQueue::acquire(&s2, (), crate::acquire::FairOrder::Fifo)
                         .await
                         .unwrap_err()
                 })

@@ -19,7 +19,7 @@ cfg_if::cfg_if! {
 
 pub use lock_api;
 
-/// A [`lock_api::RawMutex`] that is tuned for good performance for expected [`Semaphore`](crate::Semaphore) use cases.
+/// A [`lock_api::RawMutex`] that is tuned for good performance for expected flag_bearer semaphore use cases.
 ///
 /// # Implementation details
 /// * On linux, this uses a futex

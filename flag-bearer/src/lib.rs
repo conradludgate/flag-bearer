@@ -287,6 +287,7 @@
     clippy::multiple_unsafe_ops_per_block,
     clippy::undocumented_unsafe_blocks
 )]
+#![deny(unsafe_code)]
 
 use core::marker::PhantomData;
 
@@ -298,8 +299,80 @@ mod permit;
 
 pub use flag_bearer_core::SemaphoreState;
 
-use flag_bearer_queue::{Acquire, FairOrder, QueueState, acquire::Fairness};
-pub use flag_bearer_queue::{AcquireError, Closeable, IsCloseable, TryAcquireError, Uncloseable};
+use flag_bearer_queue::{
+    SemaphoreQueue,
+    acquire::{FairOrder, Fairness},
+};
+
+pub use flag_bearer_queue::acquire::AcquireError;
+/// The error returned by [`try_acquire`](Semaphore::try_acquire)
+///
+/// ### NoPermits
+///
+/// ```
+/// struct Counter(usize);
+///
+/// impl flag_bearer::SemaphoreState for Counter {
+///     type Params = ();
+///     type Permit = ();
+///
+///     fn acquire(&mut self, _: Self::Params) -> Result<Self::Permit, Self::Params> {
+///         if self.0 > 0 {
+///             self.0 -= 1;
+///             Ok(())
+///         } else {
+///             Err(())
+///         }
+///     }
+///
+///     fn release(&mut self, _: Self::Permit) {
+///         self.0 += 1;
+///     }
+/// }
+///
+/// let s = flag_bearer::Builder::fifo().with_state(Counter(0));
+///
+/// match s.try_acquire(()) {
+///     Err(flag_bearer::TryAcquireError::NoPermits(_)) => {},
+///     _ => unreachable!(),
+/// }
+/// ```
+///
+/// ### Closed
+///
+/// ```
+/// struct Counter(usize);
+///
+/// impl flag_bearer::SemaphoreState for Counter {
+///     type Params = ();
+///     type Permit = ();
+///
+///     fn acquire(&mut self, _: Self::Params) -> Result<Self::Permit, Self::Params> {
+///         if self.0 > 0 {
+///             self.0 -= 1;
+///             Ok(())
+///         } else {
+///             Err(())
+///         }
+///     }
+///
+///     fn release(&mut self, _: Self::Permit) {
+///         self.0 += 1;
+///     }
+/// }
+///
+/// let s = flag_bearer::Builder::fifo().closeable().with_state(Counter(1));
+///
+/// // closing the semaphore makes all current and new acquire() calls return an error.
+/// s.close();
+///
+/// match s.try_acquire(()) {
+///     Err(flag_bearer::TryAcquireError::Closed(_)) => {},
+///     _ => unreachable!(),
+/// }
+/// ```
+pub use flag_bearer_queue::acquire::TryAcquireError;
+pub use flag_bearer_queue::closeable::{Closeable, IsCloseable, Uncloseable};
 
 pub use permit::Permit;
 
@@ -366,12 +439,12 @@ where
     C: IsCloseable,
 {
     order: FairOrder,
-    state: Mutex<DefaultRawMutex, QueueState<S, C>>,
+    state: Mutex<DefaultRawMutex, SemaphoreQueue<S, C>>,
 }
 
 impl<S: SemaphoreState, C: IsCloseable> Semaphore<S, C> {
     fn new_inner(state: S, order: FairOrder) -> Self {
-        let state = QueueState::new(state);
+        let state = SemaphoreQueue::new(state);
         Self {
             state: Mutex::new(state),
             order,
@@ -425,21 +498,8 @@ where
         &self,
         params: S::Params,
     ) -> Result<Permit<'_, S, C>, C::AcquireError<S::Params>> {
-        let acquire = Acquire::new(&self.state, self.order, params);
+        let acquire = flag_bearer_queue::SemaphoreQueue::acquire(&self.state, params, self.order);
         Ok(Permit::out_of_thin_air(self, acquire.await?))
-    }
-
-    #[inline]
-    fn try_acquire_inner(
-        &self,
-        params: S::Params,
-        fairness: Fairness,
-    ) -> Result<S::Permit, TryAcquireError<S::Params, C>> {
-        let mut state = self.state.lock();
-        match state.unlinked_try_acquire(params, self.order, fairness) {
-            Ok(permit) => Ok(permit),
-            Err(params) => Err(params),
-        }
     }
 
     /// Acquire a new permit fairly with the given parameters.
@@ -461,7 +521,8 @@ where
         &self,
         params: S::Params,
     ) -> Result<Permit<'_, S, C>, TryAcquireError<S::Params, C>> {
-        let permit = self.try_acquire_inner(params, Fairness::Fair)?;
+        let mut state = self.state.lock();
+        let permit = state.try_acquire(params, Fairness::Fair(self.order))?;
         Ok(Permit::out_of_thin_air(self, permit))
     }
 
@@ -480,7 +541,8 @@ where
         &self,
         params: S::Params,
     ) -> Result<Permit<'_, S, C>, TryAcquireError<S::Params, C>> {
-        let permit = self.try_acquire_inner(params, Fairness::Unfair)?;
+        let mut state = self.state.lock();
+        let permit = state.try_acquire(params, Fairness::Unfair)?;
         Ok(Permit::out_of_thin_air(self, permit))
     }
 }
