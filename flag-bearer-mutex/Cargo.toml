@@ -10,7 +10,7 @@ repository = "https://github.com/conradludgate/flag-bearer"
 cfg-if = "1"
 lock_api = "0.4"
 
-[target.'cfg(target_os ="linux")'.dependencies]
+[target.'cfg(target_os = "linux")'.dependencies]
 libc = "0.2.170"
 
 [target.'cfg(not(target_os = "linux"))'.dependencies]

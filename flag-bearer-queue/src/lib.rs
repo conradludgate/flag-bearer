@@ -20,6 +20,8 @@ pub mod closeable;
 
 mod loom;
 
+/// A queue that manages the acquisition of permits from a [`SemaphoreState`], or queues tasks
+/// if no permits are available.
 // don't question the weird bounds here...
 pub struct SemaphoreQueue<
     S: SemaphoreState<Params = Params, Permit = Permit> + ?Sized,
@@ -29,7 +31,17 @@ pub struct SemaphoreQueue<
 > {
     #[allow(clippy::type_complexity)]
     queue: Result<PinList<PinQueue<Params, Permit, C>>, C::Closed<()>>,
-    pub state: S,
+    state: S,
+}
+
+impl<S: SemaphoreState + core::fmt::Debug, C: IsCloseable> core::fmt::Debug
+    for SemaphoreQueue<S, C>
+{
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        let mut d = f.debug_struct("SemaphoreQueue");
+        d.field("state", &self.state);
+        d.finish_non_exhaustive()
+    }
 }
 
 type PinQueue<Params, Permit, C> = dyn pin_list::Types<
@@ -51,6 +63,7 @@ type PinQueue<Params, Permit, C> = dyn pin_list::Types<
     >;
 
 impl<S: SemaphoreState, C: IsCloseable> SemaphoreQueue<S, C> {
+    /// Construct a new semaphore queue, with the given [`SemaphoreState`].
     pub fn new(state: S) -> Self {
         Self {
             state,
@@ -62,8 +75,20 @@ impl<S: SemaphoreState, C: IsCloseable> SemaphoreQueue<S, C> {
 }
 
 impl<S: SemaphoreState + ?Sized, C: IsCloseable> SemaphoreQueue<S, C> {
+    /// Access the state with mutable access.
+    ///
+    /// This gives direct access to the state, be careful not to
+    /// break any of your own state invariants. You can use this
+    /// to peek at the current state, or to modify it, eg to add or
+    /// remove permits from the semaphore.
+    pub fn with_state<T>(&mut self, f: impl FnOnce(&mut S) -> T) -> T {
+        let res = f(&mut self.state);
+        self.check();
+        res
+    }
+
     #[inline]
-    pub fn check(&mut self) {
+    fn check(&mut self) {
         let Ok(queue) = &mut self.queue else { return };
         let mut leader = queue.cursor_front_mut();
         while let Some(p) = leader.protected_mut() {
@@ -91,6 +116,10 @@ impl<S: SemaphoreState + ?Sized, C: IsCloseable> SemaphoreQueue<S, C> {
 }
 
 impl<S: SemaphoreState + ?Sized> SemaphoreQueue<S, Closeable> {
+    /// Close the semaphore queue.
+    ///
+    /// All tasks currently waiting to acquire a token will immediately stop.
+    /// No new acquire attempts will succeed.
     pub fn close(&mut self) {
         let Ok(queue) = &mut self.queue else {
             return;

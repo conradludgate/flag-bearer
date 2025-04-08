@@ -458,13 +458,13 @@ impl<S: SemaphoreState + core::fmt::Debug> core::fmt::Debug for Semaphore<S> {
         d.field("order", &self.order);
         match self.state.try_lock() {
             Some(guard) => {
-                d.field("state", &guard.state);
+                d.field("queue", &*guard);
             }
             None => {
-                d.field("state", &format_args!("<locked>"));
+                d.field("queue", &format_args!("<locked>"));
             }
         }
-        d.finish_non_exhaustive()
+        d.finish()
     }
 }
 
@@ -559,10 +559,7 @@ where
     /// to peek at the current state, or to modify it, eg to add or
     /// remove permits from the semaphore.
     pub fn with_state<T>(&self, f: impl FnOnce(&mut S) -> T) -> T {
-        let mut state = self.state.lock();
-        let res = f(&mut state.state);
-        state.check();
-        res
+        self.state.lock().with_state(f)
     }
 
     /// Check if the semaphore is closed
@@ -604,7 +601,10 @@ mod test {
     fn debug() {
         let s = crate::Builder::fifo().with_state(Dummy);
         let s = std::format!("{s:?}");
-        assert_eq!(s, "Semaphore { order: Fifo, state: Dummy, .. }");
+        assert_eq!(
+            s,
+            "Semaphore { order: Fifo, queue: SemaphoreQueue { state: Dummy, .. } }"
+        );
     }
 
     #[test]
