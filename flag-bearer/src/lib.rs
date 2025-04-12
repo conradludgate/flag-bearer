@@ -290,6 +290,7 @@
 #![deny(unsafe_code)]
 
 use core::marker::PhantomData;
+use std::task::{Context, Poll};
 
 mod drop_wrapper;
 mod permit;
@@ -492,6 +493,21 @@ where
     pub async fn must_acquire(&self, params: S::Params) -> Permit<'_, S, Uncloseable> {
         self.acquire(params).await.unwrap_or_else(|e| e.never())
     }
+
+    /// Acquire a permit while the `poll_fn` doesn't complete.
+    pub async fn acquire_while<E>(
+        &self,
+        params: S::Params,
+        poll_fn: impl FnMut(&mut S, &S::Params, &mut Context) -> Poll<E>,
+    ) -> Result<Permit<'_, S, Uncloseable>, E> {
+        let acquire = flag_bearer_queue::SemaphoreQueue::acquire_while(
+            &self.state,
+            params,
+            self.order,
+            poll_fn,
+        );
+        Ok(Permit::out_of_thin_air(self, acquire.await?))
+    }
 }
 
 impl<S, C> Semaphore<S, C>
@@ -573,6 +589,16 @@ where
     /// remove permits from the semaphore.
     pub fn with_state<T>(&self, f: impl FnOnce(&mut S) -> T) -> T {
         self.state.lock().with_state(f)
+    }
+
+    /// Get the state with mutable access.
+    ///
+    /// This gives direct access to the state, be careful not to
+    /// break any of your own state invariants. You can use this
+    /// to peek at the current state, or to modify it, eg to add or
+    /// remove permits from the semaphore.
+    pub fn get_state(&mut self) -> &mut S {
+        self.state.get_mut().get_state()
     }
 
     /// Check if the semaphore is closed

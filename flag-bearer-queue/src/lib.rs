@@ -17,6 +17,7 @@ use pin_list::PinList;
 
 pub mod acquire;
 pub mod closeable;
+pub mod acquire_while;
 
 mod loom;
 
@@ -85,6 +86,20 @@ impl<S: SemaphoreState + ?Sized, C: IsCloseable> SemaphoreQueue<S, C> {
         let res = f(&mut self.state);
         self.check();
         res
+    }
+
+    /// Access the state with mutable access.
+    ///
+    /// This gives direct access to the state, be careful not to
+    /// break any of your own state invariants. You can use this
+    /// to peek at the current state, or to modify it, eg to add or
+    /// remove permits from the semaphore.
+    ///
+    /// If any modifications are made that progress the queue,
+    /// [`SemaphoreQueue::check`] must be called.
+    /// Consider using [`SemaphoreQueue::with_state`] instead.
+    pub fn get_state(&mut self) -> &mut S {
+        &mut self.state
     }
 
     #[inline]
