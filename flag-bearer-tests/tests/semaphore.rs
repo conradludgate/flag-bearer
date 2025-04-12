@@ -45,7 +45,7 @@ mod semaphore {
 
         pub fn new(count: usize) -> Self {
             Self(
-                flag_bearer::Builder::fifo()
+                flag_bearer::new_fifo()
                     .closeable()
                     .with_state(SemaphoreCounter(count)),
             )

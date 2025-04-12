@@ -71,7 +71,7 @@
 //!
 //! # pollster::block_on(async {
 //! // create a new FIFO semaphore with 20 permits
-//! let semaphore = flag_bearer::Builder::fifo().closeable().with_state(SemaphoreCounter(20));
+//! let semaphore = flag_bearer::new_fifo().closeable().with_state(SemaphoreCounter(20));
 //!
 //! // acquire a token
 //! let _permit = semaphore.acquire(1).await.expect("semaphore shouldn't be closed");
@@ -134,7 +134,7 @@
 //!
 //! # pollster::block_on(async {
 //! // create a new FIFO semaphore with 20 tokens
-//! let semaphore = flag_bearer::Builder::fifo().with_state(Utilisation::new(20));
+//! let semaphore = flag_bearer::new_fifo().with_state(Utilisation::new(20));
 //!
 //! // acquire a permit
 //! let _permit = semaphore.must_acquire(()).await;
@@ -194,7 +194,7 @@
 //!
 //! # pollster::block_on(async {
 //! // create a new LIFO semaphore with support for 1 MB and 20 requests
-//! let semaphore = flag_bearer::Builder::lifo().with_state(Utilisation {
+//! let semaphore = flag_bearer::new_lifo().with_state(Utilisation {
 //!     requests: 20,
 //!     bytes: 1024 * 1024,
 //! });
@@ -271,7 +271,7 @@
 //! // We choose LIFO here because we create new connections on timeout, and LIFO is
 //! // more likely to have timeouts but on fewer tasks, which ends up improving our
 //! // performance.
-//! let semaphore = flag_bearer::Builder::lifo().with_state(Pool::default());
+//! let semaphore = flag_bearer::new_lifo().with_state(Pool::default());
 //!
 //! let mut conn = acquire_conn(&semaphore).await;
 //!
@@ -279,20 +279,17 @@
 //! conn.query().await;
 //! # })
 //! ```
-
-#![no_std]
 #![warn(
     unsafe_op_in_unsafe_fn,
     clippy::missing_safety_doc,
     clippy::multiple_unsafe_ops_per_block,
-    clippy::undocumented_unsafe_blocks
+    clippy::undocumented_unsafe_blocks,
+    clippy::doc_markdown,
+    missing_docs
 )]
 #![deny(unsafe_code)]
 
 use core::marker::PhantomData;
-
-#[cfg(test)]
-extern crate std;
 
 mod drop_wrapper;
 mod permit;
@@ -307,7 +304,7 @@ use flag_bearer_queue::{
 pub use flag_bearer_queue::acquire::AcquireError;
 /// The error returned by [`try_acquire`](Semaphore::try_acquire)
 ///
-/// ### NoPermits
+/// ### `NoPermits`
 ///
 /// ```
 /// struct Counter(usize);
@@ -330,7 +327,7 @@ pub use flag_bearer_queue::acquire::AcquireError;
 ///     }
 /// }
 ///
-/// let s = flag_bearer::Builder::fifo().with_state(Counter(0));
+/// let s = flag_bearer::new_fifo().with_state(Counter(0));
 ///
 /// match s.try_acquire(()) {
 ///     Err(flag_bearer::TryAcquireError::NoPermits(_)) => {},
@@ -361,7 +358,7 @@ pub use flag_bearer_queue::acquire::AcquireError;
 ///     }
 /// }
 ///
-/// let s = flag_bearer::Builder::fifo().closeable().with_state(Counter(1));
+/// let s = flag_bearer::new_fifo().closeable().with_state(Counter(1));
 ///
 /// // closing the semaphore makes all current and new acquire() calls return an error.
 /// s.close();
@@ -374,10 +371,22 @@ pub use flag_bearer_queue::acquire::AcquireError;
 pub use flag_bearer_queue::acquire::TryAcquireError;
 pub use flag_bearer_queue::closeable::{Closeable, IsCloseable, Uncloseable};
 
-pub use permit::Permit;
+pub use permit::{OwnedPermit, Permit};
 
 use flag_bearer_mutex::RawMutex as DefaultRawMutex;
 use flag_bearer_mutex::lock_api::Mutex;
+
+/// Create a new first-in-first-out semaphore builder
+#[must_use]
+pub fn new_fifo() -> Builder {
+    Builder::fifo()
+}
+
+/// Create a new last-in-first-out semaphore builder
+#[must_use]
+pub fn new_lifo() -> Builder {
+    Builder::lifo()
+}
 
 /// A Builder for [`Semaphore`]s.
 pub struct Builder<C = Uncloseable>
@@ -390,6 +399,7 @@ where
 
 impl Builder {
     /// Create a new first-in-first-out semaphore builder
+    #[must_use]
     pub fn fifo() -> Self {
         Self {
             order: FairOrder::Fifo,
@@ -398,6 +408,7 @@ impl Builder {
     }
 
     /// Create a new last-in-first-out semaphore builder
+    #[must_use]
     pub fn lifo() -> Self {
         Self {
             order: FairOrder::Lifo,
@@ -406,6 +417,7 @@ impl Builder {
     }
 
     /// The semaphore this builder constructs will be closeable.
+    #[must_use]
     pub fn closeable(self) -> Builder<Closeable> {
         Builder {
             order: self.order,
@@ -419,6 +431,7 @@ where
     C: IsCloseable,
 {
     /// Build the [`Semaphore`] with the provided initial state.
+    #[must_use]
     pub fn with_state<S: SemaphoreState>(self, state: S) -> Semaphore<S, C> {
         Semaphore::new_inner(state, self.order)
     }
@@ -599,7 +612,7 @@ mod test {
 
     #[test]
     fn debug() {
-        let s = crate::Builder::fifo().with_state(Dummy);
+        let s = crate::new_fifo().with_state(Dummy);
         let s = std::format!("{s:?}");
         assert_eq!(
             s,
@@ -609,10 +622,10 @@ mod test {
 
     #[test]
     fn is_closed() {
-        let s = crate::Builder::fifo().with_state(Dummy);
+        let s = crate::new_fifo().with_state(Dummy);
         assert!(!s.is_closed());
 
-        let s = crate::Builder::fifo().closeable().with_state(Dummy);
+        let s = crate::new_fifo().closeable().with_state(Dummy);
         assert!(!s.is_closed());
         s.close();
         assert!(s.is_closed());

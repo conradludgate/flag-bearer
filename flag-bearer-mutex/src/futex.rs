@@ -83,7 +83,22 @@ impl RawMutex {
             }
 
             // Wait for the futex to change state, assuming it is still CONTENDED.
+            //
             // Safety: these are the correct syscall parameters on linux
+            // <https://www.man7.org/linux/man-pages/man2/futex.2.html>
+            //   long syscall(SYS_futex, uint32_t *uaddr, int futex_op, uint32_t val,
+            //     const struct timespec *timeout, /* or: uint32_t val2 */
+            //     uint32_t *uaddr2, uint32_t val3)
+            //
+            // std uses `WAIT_BITSET` for the timeout,
+            // which we don't need but no point changing it here.
+            //
+            // > Note: for FUTEX_WAIT, timeout is interpreted as a relative
+            // > value.  This differs from other futex operations, where
+            // > timeout is interpreted as an absolute value.  To obtain the
+            // > equivalent of FUTEX_WAIT with an absolute timeout, employ
+            // > FUTEX_WAIT_BITSET with val3 specified as
+            // > FUTEX_BITSET_MATCH_ANY.
             unsafe {
                 libc::syscall(
                     libc::SYS_futex,
@@ -103,6 +118,7 @@ impl RawMutex {
 
     fn spin(&self) -> u32 {
         // std uses 100 spins here, but I think less spinning is typically better (and it still performs well).
+        // TODO: test with higher thread counts to see if thread::yield_now() could help.
         let mut spin = 4;
         loop {
             // We only use `load` (and not `swap` or `compare_exchange`)
@@ -123,6 +139,13 @@ impl RawMutex {
     #[cold]
     fn wake(&self) {
         // Safety: these are the correct syscall parameters on linux
+        // <https://www.man7.org/linux/man-pages/man2/futex.2.html>
+        //   long syscall(SYS_futex, uint32_t *uaddr, int futex_op, uint32_t val,
+        //     const struct timespec *timeout, /* or: uint32_t val2 */
+        //     uint32_t *uaddr2, uint32_t val3)
+        // > The arguments timeout, uaddr2, and val3 are ignored.
+        // > Most commonly, val is specified as either 1 (wake up a single waiter)
+        // > or INT_MAX (wake up all waiters).
         unsafe {
             libc::syscall(
                 libc::SYS_futex,

@@ -1,4 +1,4 @@
-use flag_bearer::{Builder, SemaphoreState};
+use flag_bearer::SemaphoreState;
 
 struct Conn(usize);
 
@@ -22,7 +22,7 @@ impl SemaphoreState for Pool {
 
 #[tokio::test]
 async fn pool() {
-    let pool = Builder::lifo().with_state(Pool::default());
+    let pool = flag_bearer::new_lifo().with_state(Pool::default());
 
     pool.with_state(|s| {
         s.objects.push(Conn(0));

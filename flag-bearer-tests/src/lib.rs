@@ -31,7 +31,7 @@ pub struct Permit<'a>(flag_bearer::Permit<'a, SemaphoreCounter>);
 
 impl Semaphore {
     pub fn new(count: usize) -> Self {
-        Self(flag_bearer::Builder::fifo().with_state(SemaphoreCounter(count)))
+        Self(flag_bearer::new_fifo().with_state(SemaphoreCounter(count)))
     }
 
     #[allow(dead_code)]

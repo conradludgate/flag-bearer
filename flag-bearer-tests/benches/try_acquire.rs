@@ -5,10 +5,17 @@ use flag_bearer_tests::bench::async_bench;
 fn main() {
     let t = available_parallelism().unwrap().get();
 
+    let t4 = t * 4;
     let slow = t / 2;
     let fast = t * 2;
     let rounds = 50000;
     let iters = 50;
+
+    println!("flag_bearer[threads = {t4}, permits = {slow}]:");
+    let semaphore = flag_bearer_tests::Semaphore::new(slow);
+    async_bench(t4, rounds, iters, semaphore, async |s| {
+        black_box(s.try_acquire());
+    });
 
     println!("flag_bearer[threads = {t}, permits = {slow}]:");
     let semaphore = flag_bearer_tests::Semaphore::new(slow);
@@ -26,6 +33,12 @@ fn main() {
     let semaphore = flag_bearer_tests::Semaphore::new(64);
     async_bench(2, rounds, iters, semaphore, async |s| {
         black_box(s.try_acquire());
+    });
+
+    println!("tokio[threads = {t4}, permits = {slow}]:");
+    let semaphore = tokio::sync::Semaphore::new(slow);
+    async_bench(t4, rounds, iters, semaphore, async |s| {
+        drop(black_box(s.try_acquire()));
     });
 
     println!("tokio[threads = {t}, permits = {slow}]:");

@@ -1,3 +1,8 @@
+//! Core traits for the `flag-bearer` family of crates.
+//!
+//! It's expected that you consume `flag-bearer` crate directly, but this is
+//! exposed for flexibilty of queue implementations.
+
 #![no_std]
 #![deny(unsafe_code)]
 
@@ -39,8 +44,10 @@ pub trait SemaphoreState {
 
     /// Acquire a permit given the params.
     ///
-    /// If a permit could not be acquired with the params, return an error with the
-    /// original params back.
+    /// # Errors
+    ///
+    /// If a permit could not be acquired with the given params,
+    /// return an error and the original params back.
     fn acquire(&mut self, params: Self::Params) -> Result<Self::Permit, Self::Params>;
 
     /// Return the permit back to the semaphore.

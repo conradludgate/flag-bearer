@@ -1,4 +1,5 @@
-#![no_std]
+//! A [`lock_api::RawMutex`] that is tuned for good performance for expected `flag_bearer` semaphore use cases.
+
 #![warn(
     unsafe_op_in_unsafe_fn,
     clippy::missing_safety_doc,
@@ -19,7 +20,7 @@ cfg_if::cfg_if! {
 
 pub use lock_api;
 
-/// A [`lock_api::RawMutex`] that is tuned for good performance for expected flag_bearer semaphore use cases.
+/// A [`lock_api::RawMutex`] that is tuned for good performance for expected `flag_bearer` semaphore use cases.
 ///
 /// # Implementation details
 /// * On linux, this uses a futex

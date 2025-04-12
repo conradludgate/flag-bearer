@@ -77,9 +77,9 @@ impl<S: SemaphoreState + ?Sized, C: IsCloseable, R: RawMutex> Future for Acquire
             let params = this.params.take().unwrap();
             let node = this.node.as_mut();
 
-            match state.try_acquire(params, Fairness::Fair(*this.order)) {
-                Ok(permit) => return Poll::Ready(Ok(permit)),
-                Err(TryAcquireError::Closed(params)) => return Poll::Ready(Err(params)),
+            return match state.try_acquire(params, Fairness::Fair(*this.order)) {
+                Ok(permit) => Poll::Ready(Ok(permit)),
+                Err(TryAcquireError::Closed(params)) => Poll::Ready(Err(params)),
                 Err(TryAcquireError::NoPermits(params)) => {
                     let queue = match &mut state.queue {
                         Ok(queue) => queue,
@@ -89,14 +89,16 @@ impl<S: SemaphoreState + ?Sized, C: IsCloseable, R: RawMutex> Future for Acquire
                     };
 
                     // no permit or we are not the leader, so we register into the queue.
-                    let waker = cx.waker().clone();
+                    let mut cursor = queue.cursor_ghost_mut();
+                    let protected = (Some(params), cx.waker().clone());
+                    let unprotected = ();
                     match *this.order {
-                        FairOrder::Lifo => queue.push_front(node, (Some(params), waker), ()),
-                        FairOrder::Fifo => queue.push_back(node, (Some(params), waker), ()),
+                        FairOrder::Lifo => cursor.insert_after(node, protected, unprotected),
+                        FairOrder::Fifo => cursor.insert_before(node, protected, unprotected),
                     };
-                    return Poll::Pending;
+                    Poll::Pending
                 }
-            }
+            };
         };
 
         if let Ok(queue) = &mut state.queue {
@@ -137,7 +139,9 @@ pub enum FairOrder {
 #[non_exhaustive]
 /// Which fairness property [`SemaphoreQueue::try_acquire`] should respect
 pub enum Fairness {
+    /// [`SemaphoreQueue::try_acquire`] will be fair.
     Fair(FairOrder),
+    /// [`SemaphoreQueue::try_acquire`] will be unfair.
     Unfair,
 }
 
@@ -164,6 +168,17 @@ impl<S: SemaphoreState + ?Sized, C: IsCloseable> SemaphoreQueue<S, C> {
     ///
     /// * If the fairness is [`Fairness::Unfair`], or [`Fairness::Fair(FairOrder::Lifo)`](FairOrder::Lifo), then we always try acquire a permit.
     /// * If the fairness is [`Fairness::Fair(FairOrder::Fifo)`](FairOrder::Fifo), then we only try acquire a permit if the queue is empty.
+    ///
+    /// # Errors
+    ///
+    /// If there are currently not enough permits available for the given request,
+    /// then [`TryAcquireError::NoPermits`] is returned.
+    ///
+    /// If this is a [`Fairness::Fair(FairOrder::Fifo)`](FairOrder::Fifo) semaphore queue,
+    /// and there are other tasks waiting for permits,
+    /// then [`TryAcquireError::NoPermits`] is returned.
+    ///
+    /// If this semaphore [`is_closed`](SemaphoreQueue::is_closed), then [`TryAcquireError::Closed`] is returned.
     #[inline]
     pub fn try_acquire(
         &mut self,
@@ -180,10 +195,10 @@ impl<S: SemaphoreState + ?Sized, C: IsCloseable> SemaphoreQueue<S, C> {
         let is_leader = match fairness {
             // if first-in-first-out, we are only the leader if the queue is empty.
             Fairness::Fair(FairOrder::Fifo) => queue.is_empty(),
-            // if last-in-first-out, we are the last in and thus the leader.
-            Fairness::Fair(FairOrder::Lifo) => true,
+
             // if unfair, then we don't care who the leader is.
-            Fairness::Unfair => true,
+            // if last-in-first-out, we are the last in and thus the leader.
+            Fairness::Unfair | Fairness::Fair(FairOrder::Lifo) => true,
         };
 
         if !is_leader {
@@ -197,6 +212,7 @@ impl<S: SemaphoreState + ?Sized, C: IsCloseable> SemaphoreQueue<S, C> {
     }
 }
 
+/// The error returned by [`SemaphoreQueue::try_acquire`].
 #[derive(Debug, PartialEq, Eq)]
 pub enum TryAcquireError<P, C: IsCloseable> {
     /// The semaphore had no permits to give out right now.
@@ -238,7 +254,7 @@ impl<P, C: IsCloseable> fmt::Display for TryAcquireError<P, C> {
 /// }
 ///
 /// # pollster::block_on(async move {
-/// let s = flag_bearer::Builder::fifo().closeable().with_state(Counter(1));
+/// let s = flag_bearer::new_fifo().closeable().with_state(Counter(1));
 ///
 /// // closing the semaphore makes all current and new acquire() calls return an error.
 /// s.close();
