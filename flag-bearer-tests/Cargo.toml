@@ -5,7 +5,7 @@ edition = "2024"
 publish = false
 
 [dependencies]
-flag-bearer = { path = "../flag-bearer", version = "0.1.0-rc.6" }
+flag-bearer = { path = "../flag-bearer", version = "0.1.0-rc.7" }
 pollster = "0.4"
 hdrhistogram = "7.5.4"
 
