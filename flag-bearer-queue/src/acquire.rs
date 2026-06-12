@@ -99,12 +99,12 @@ impl<S: SemaphoreState + ?Sized, C: IsCloseable, R: RawMutex> Future for Acquire
             }
         };
 
-        if let Ok(queue) = &mut state.queue {
-            if let Some((_, waker)) = init.protected_mut(queue) {
-                // spurious wakeup
-                waker.clone_from(cx.waker());
-                return Poll::Pending;
-            }
+        if let Ok(queue) = &mut state.queue
+            && let Some((_, waker)) = init.protected_mut(queue)
+        {
+            // spurious wakeup
+            waker.clone_from(cx.waker());
+            return Poll::Pending;
         }
 
         // Safety: Either there is no queue, then we are guaranteed to be removed from it

@@ -1,6 +1,6 @@
 use std::sync::Arc;
 
-use flag_bearer::{Semaphore, Builder, SemaphoreState};
+use flag_bearer::{Builder, Semaphore, SemaphoreState};
 
 #[derive(Debug)]
 struct Dummy;
