@@ -139,6 +139,14 @@ name = "flag-bearer-core"
 version = "0.1.0-rc.6"
 
 [[package]]
+name = "flag-bearer-examples"
+version = "0.1.0"
+dependencies = [
+ "flag-bearer",
+ "tokio",
+]
+
+[[package]]
 name = "flag-bearer-mutex"
 version = "0.1.0-rc.6"
 dependencies = [
