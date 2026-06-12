@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.0-rc.8](https://github.com/conradludgate/flag-bearer/compare/flag-bearer-queue-v0.1.0-rc.7...flag-bearer-queue-v0.1.0-rc.8) - 2026-06-12
+
+### Fixed
+
+- fix deadlock
+
+### Other
+
+- release v0.1.0-rc.8
+- poison the semaphore when user code panics
+- clippy and fmt
+
 ## [0.1.0-rc.7](https://github.com/conradludgate/flag-bearer/compare/flag-bearer-queue-v0.1.0-rc.6...flag-bearer-queue-v0.1.0-rc.7) - 2026-06-12
 
 ### Fixed
