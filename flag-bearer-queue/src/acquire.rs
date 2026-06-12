@@ -87,6 +87,15 @@ impl<S: SemaphoreState + ?Sized, C: IsCloseable, R: RawMutex> Future for Acquire
             match state.try_acquire(params, Fairness::Fair(*this.order)) {
                 Ok(permit) => return Poll::Ready(Ok(permit)),
                 Err(TryAcquireError::Closed(params)) => return Poll::Ready(Err(params)),
+                // The async acquire's error type can't carry poison (it is
+                // uninhabited for uncloseable semaphores, keeping `must_acquire`
+                // infallible), so poison is a panic on this path. Callers that
+                // want to observe poison should use `try_acquire`.
+                Err(TryAcquireError::Poisoned(_params)) => {
+                    panic!(
+                        "the semaphore is poisoned: a previous SemaphoreState::acquire call panicked"
+                    )
+                }
                 Err(TryAcquireError::NoPermits(params)) => {
                     let queue = match &mut state.queue {
                         Ok(queue) => queue,
@@ -177,6 +186,10 @@ impl<S: SemaphoreState + ?Sized, C: IsCloseable> SemaphoreQueue<S, C> {
         params: S::Params,
         fairness: Fairness,
     ) -> Result<S::Permit, TryAcquireError<S::Params, C>> {
+        if self.is_poisoned() {
+            return Err(TryAcquireError::Poisoned(params));
+        }
+
         let queue = match &mut self.queue {
             Ok(queue) => queue,
             Err(_closed) => {
@@ -197,7 +210,13 @@ impl<S: SemaphoreState + ?Sized, C: IsCloseable> SemaphoreQueue<S, C> {
             return Err(TryAcquireError::NoPermits(params));
         }
 
-        match self.state.acquire(params) {
+        // A panic in `acquire` may leave `state` half-updated (no node is
+        // involved here, so this is the only record), so poison if it unwinds.
+        let guard = crate::PoisonOnUnwind(&mut self.poisoned);
+        let result = self.state.acquire(params);
+        core::mem::forget(guard);
+
+        match result {
             Ok(permit) => Ok(permit),
             Err(p) => Err(TryAcquireError::NoPermits(p)),
         }
@@ -210,6 +229,9 @@ pub enum TryAcquireError<P, C: IsCloseable> {
     NoPermits(P),
     /// The semaphore is closed.
     Closed(C::AcquireError<P>),
+    /// The semaphore is poisoned: a previous [`SemaphoreState::acquire`](crate::SemaphoreState::acquire)
+    /// call panicked. The params are handed back unused.
+    Poisoned(P),
 }
 
 impl<P, C: IsCloseable> fmt::Display for TryAcquireError<P, C> {
@@ -217,6 +239,7 @@ impl<P, C: IsCloseable> fmt::Display for TryAcquireError<P, C> {
         match self {
             TryAcquireError::Closed(_) => write!(fmt, "semaphore closed"),
             TryAcquireError::NoPermits(_) => write!(fmt, "no permits available"),
+            TryAcquireError::Poisoned(_) => write!(fmt, "semaphore poisoned"),
         }
     }
 }

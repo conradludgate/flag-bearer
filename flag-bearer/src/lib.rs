@@ -566,6 +566,32 @@ where
     pub fn is_closed(&self) -> bool {
         C::CLOSE && self.state.lock().is_closed()
     }
+
+    /// Check if the semaphore is poisoned.
+    ///
+    /// A semaphore becomes poisoned if a call to [`SemaphoreState::acquire`] panics.
+    /// The semaphore stops handing out permits:
+    /// * [`try_acquire`](Semaphore::try_acquire) returns [`TryAcquireError::Poisoned`].
+    /// * [`acquire`](Semaphore::acquire) panics (its error type can't represent poison,
+    ///   which is what keeps [`must_acquire`](Semaphore::must_acquire) infallible).
+    /// * [`with_state`](Semaphore::with_state) still works, so the (possibly half-updated)
+    ///   state can be inspected.
+    pub fn is_poisoned(&self) -> bool {
+        self.state.lock().is_poisoned()
+    }
+
+    /// Clear the [`poison`](Semaphore::is_poisoned) flag, letting the semaphore
+    /// hand out permits again.
+    ///
+    /// You are responsible for ensuring the [`SemaphoreState`] is consistent again
+    /// first — inspect/repair it with [`with_state`](Semaphore::with_state). Like
+    /// [`std::sync::Mutex::clear_poison`], this does not itself touch the state.
+    ///
+    /// A blocking [`acquire`](Semaphore::acquire) whose `acquire` impl panicked lost
+    /// its params and can never complete; it is skipped until its future is dropped.
+    pub fn clear_poison(&self) {
+        self.state.lock().clear_poison();
+    }
 }
 
 impl<S> Semaphore<S, Closeable>

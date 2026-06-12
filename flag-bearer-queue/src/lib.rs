@@ -31,7 +31,24 @@ pub struct SemaphoreQueue<
 > {
     #[allow(clippy::type_complexity)]
     queue: Result<PinList<PinQueue<Params, Permit, C>>, C::Closed<()>>,
+    /// Set if a panic ever escaped user code (`SemaphoreState::acquire` or a
+    /// `with_state` closure) while we held the state, which may have left `state`
+    /// half-updated. We can't tell a clean panic from a corrupting one, so — like
+    /// [`std::sync::Mutex`] — we assume the worst until `clear_poison`.
+    /// `state` must stay the last field so it can be `?Sized`.
+    poisoned: bool,
     state: S,
+}
+
+/// Sets the poison flag if dropped. Drop only runs if we unwind out of the
+/// guarded user call; [`core::mem::forget`] it on the success path so a clean
+/// call leaves the flag untouched (and never *clears* a prior poison).
+pub(crate) struct PoisonOnUnwind<'a>(pub(crate) &'a mut bool);
+
+impl Drop for PoisonOnUnwind<'_> {
+    fn drop(&mut self) {
+        *self.0 = true;
+    }
 }
 
 impl<S: SemaphoreState + core::fmt::Debug, C: IsCloseable> core::fmt::Debug
@@ -48,7 +65,9 @@ type PinQueue<Params, Permit, C> = dyn pin_list::Types<
         Id = pin_list::id::DebugChecked,
         Protected = (
             // Some(params) -> Pending
-            // None -> Invalid state.
+            // None -> the leader's params have been taken: transiently while
+            //         check() acquires, or left behind if that acquire panicked
+            //         (in which case the queue is also poisoned).
             Option<Params>,
             Waker,
         ),
@@ -67,6 +86,7 @@ impl<S: SemaphoreState, C: IsCloseable> SemaphoreQueue<S, C> {
     pub fn new(state: S) -> Self {
         Self {
             state,
+            poisoned: false,
             // Safety: during acquire, we ensure that nodes in this queue
             // will never attempt to use a different queue to read the nodes.
             queue: Ok(PinList::new(unsafe { pin_list::id::DebugChecked::new() })),
@@ -82,20 +102,39 @@ impl<S: SemaphoreState + ?Sized, C: IsCloseable> SemaphoreQueue<S, C> {
     /// to peek at the current state, or to modify it, eg to add or
     /// remove permits from the semaphore.
     pub fn with_state<T>(&mut self, f: impl FnOnce(&mut S) -> T) -> T {
+        // A panic in `f` may leave `state` half-updated, so poison if it unwinds.
+        let guard = PoisonOnUnwind(&mut self.poisoned);
         let res = f(&mut self.state);
+        core::mem::forget(guard);
+
         self.check();
         res
     }
 
     #[inline]
     fn check(&mut self) {
+        if self.poisoned {
+            return;
+        }
         let Ok(queue) = &mut self.queue else { return };
         let mut leader = queue.cursor_front_mut();
         while let Some(p) = leader.protected_mut() {
-            let params = p.0.take().expect(
-                "params should be in place. possibly the SemaphoreState::acquire method panicked",
-            );
-            match self.state.acquire(params) {
+            let Some(params) = p.0.take() else {
+                // This node's params were lost to a panic in `acquire`. While
+                // poisoned, the check above returns early, so we only reach here
+                // after `clear_poison`. The waiter can never be satisfied (and
+                // leaves when its future is dropped), so skip it and keep serving
+                // the rest of the queue.
+                leader.move_next();
+                continue;
+            };
+            // A panic in `acquire` loses `params` and may leave `state`
+            // half-updated, so poison if it unwinds.
+            let guard = PoisonOnUnwind(&mut self.poisoned);
+            let result = self.state.acquire(params);
+            core::mem::forget(guard);
+
+            match result {
                 Ok(permit) => match leader.remove_current(Ok(permit)) {
                     Ok((_, waker)) => waker.wake(),
                     // Safety: with protected_mut, we have just made sure it is in the list
@@ -112,6 +151,29 @@ impl<S: SemaphoreState + ?Sized, C: IsCloseable> SemaphoreQueue<S, C> {
     /// Check if the queue is closed
     pub fn is_closed(&self) -> bool {
         self.queue.is_err()
+    }
+
+    /// Check if the queue has been poisoned.
+    ///
+    /// A queue becomes poisoned if a panic unwinds out of [`SemaphoreState::acquire`]
+    /// or a [`with_state`](Self::with_state) closure, which may have left the state
+    /// half-updated. Poisoning persists until [`clear_poison`](Self::clear_poison).
+    /// A poisoned queue stops granting permits; new acquire attempts surface the
+    /// poison rather than build on a corrupt state.
+    pub fn is_poisoned(&self) -> bool {
+        self.poisoned
+    }
+
+    /// Clear the poison flag, letting the queue grant permits again.
+    ///
+    /// The caller is responsible for ensuring the state is consistent first (e.g.
+    /// inspect/repair it with [`with_state`](Self::with_state)); like
+    /// [`std::sync::Mutex::clear_poison`], this does not itself touch the state.
+    ///
+    /// A blocking acquire whose `acquire` impl panicked lost its params and can
+    /// never complete; it is skipped until its future is dropped.
+    pub fn clear_poison(&mut self) {
+        self.poisoned = false;
     }
 }
 

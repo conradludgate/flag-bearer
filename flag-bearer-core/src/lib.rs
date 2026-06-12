@@ -41,6 +41,13 @@ pub trait SemaphoreState {
     ///
     /// If a permit could not be acquired with the params, return an error with the
     /// original params back.
+    ///
+    /// # Panics
+    ///
+    /// This method should not panic. If it does, the params are lost and `self` may be
+    /// left half-updated, so the semaphore is *poisoned*: it stops handing out permits.
+    /// A blocking `acquire` then panics, while `try_acquire` reports the poison via its
+    /// error type.
     fn acquire(&mut self, params: Self::Params) -> Result<Self::Permit, Self::Params>;
 
     /// Return the permit back to the semaphore.

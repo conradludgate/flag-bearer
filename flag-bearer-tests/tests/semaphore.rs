@@ -72,6 +72,8 @@ mod semaphore {
                 Ok(permit) => Ok(Permit(permit)),
                 Err(flag_bearer::TryAcquireError::NoPermits(_)) => Err(TryAcquireError::NoPermits),
                 Err(flag_bearer::TryAcquireError::Closed(_)) => Err(TryAcquireError::Closed),
+                // This semaphore's `acquire` never panics, so it never poisons.
+                Err(flag_bearer::TryAcquireError::Poisoned(_)) => unreachable!(),
             }
         }
 
@@ -80,6 +82,8 @@ mod semaphore {
                 Ok(permit) => Ok(Permit(permit)),
                 Err(flag_bearer::TryAcquireError::NoPermits(_)) => Err(TryAcquireError::NoPermits),
                 Err(flag_bearer::TryAcquireError::Closed(_)) => Err(TryAcquireError::Closed),
+                // This semaphore's `acquire` never panics, so it never poisons.
+                Err(flag_bearer::TryAcquireError::Poisoned(_)) => unreachable!(),
             }
         }
 
