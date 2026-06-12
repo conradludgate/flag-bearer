@@ -45,10 +45,17 @@ pin_project_lite::pin_project! {
             let mut state = this.state.lock();
             match &mut state.queue {
                 Ok(queue) => {
-                    let (data, _unprotected) = node.reset(queue);
-                    if let NodeData::Removed(Ok(permit)) = data {
-                        state.state.release(permit);
-                        state.check();
+                    match node.reset(queue).0 {
+                        // We were granted a permit but never claimed it; return it.
+                        NodeData::Removed(Ok(permit)) => {
+                            state.state.release(permit);
+                            state.check();
+                        }
+                        // We were still queued and have now left the queue. If we were
+                        // a head-of-line blocker, the waiters behind us may now be
+                        // serviceable, so re-check.
+                        NodeData::Linked(_) => state.check(),
+                        NodeData::Removed(Err(_closed)) => {}
                     }
                 }
                 Err(_closed) => {

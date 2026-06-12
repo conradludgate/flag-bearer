@@ -341,6 +341,36 @@ fn fifo_unfair() {
 }
 
 #[test]
+fn fifo_cancel_head_of_line_blocker() {
+    // A FIFO semaphore with 2 permits available.
+    let s = Semaphore::new(2);
+
+    let mut cx = Context::from_waker(noop_waker_ref());
+
+    // `a1` wants 3 permits — more than the 2 available — so it queues at the
+    // head and blocks. `Box::pin` (rather than `pin!`) so that dropping it
+    // actually runs the future's destructor, i.e. cancels the acquire.
+    let mut a1 = Box::pin(s.acquire_many(3));
+    assert!(a1.as_mut().poll(&mut cx).is_pending());
+
+    // `a2` only wants 1 permit, but must queue behind `a1` (FIFO head-of-line
+    // blocking) even though a permit is free.
+    let mut a2 = pin!(s.acquire_many(1));
+    assert!(a2.as_mut().poll(&mut cx).is_pending());
+
+    // Cancel the head-of-line blocker.
+    drop(a1);
+
+    // 2 permits are available and `a2` only wants 1, so it should now be
+    // grantable. If the queue is not re-checked when a waiting node is
+    // cancelled, `a2` is never woken and stays pending forever.
+    assert!(
+        a2.as_mut().poll(&mut cx).is_ready(),
+        "a2 should be granted after the head-of-line blocker was cancelled",
+    );
+}
+
+#[test]
 fn closed() {
     let s = Semaphore::new(0);
     let mut a1 = pin!(s.acquire_many(3));
