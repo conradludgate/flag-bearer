@@ -30,3 +30,22 @@ impl Order for FairOrder {
         matches!(self, FairOrder::Lifo)
     }
 }
+
+/// A size-gated blend of FIFO and LIFO: behaves as FIFO while at most `lifo_above`
+/// tasks are waiting, and switches to LIFO once the queue grows beyond that.
+///
+/// This keeps FIFO's predictability under light load while degrading like LIFO
+/// under contention. Note that under sustained overload the FIFO backlog can be
+/// starved — this gives up FIFO's no-starvation guarantee.
+#[derive(Debug, Clone, Copy)]
+pub struct Hybrid {
+    /// The queue length above which new waiters are enqueued LIFO.
+    pub lifo_above: usize,
+}
+
+impl Order for Hybrid {
+    #[inline]
+    fn enqueue_front(&mut self, queued: usize) -> bool {
+        queued > self.lifo_above
+    }
+}

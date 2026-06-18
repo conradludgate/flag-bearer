@@ -301,7 +301,7 @@ pub use flag_bearer_core::SemaphoreState;
 
 use flag_bearer_queue::SemaphoreQueue;
 
-pub use flag_bearer_queue::{FairOrder, Order};
+pub use flag_bearer_queue::{FairOrder, Hybrid, Order};
 
 pub use flag_bearer_queue::acquire::AcquireError;
 /// The error returned by [`try_acquire`](Semaphore::try_acquire)
@@ -404,6 +404,21 @@ impl Builder {
         }
     }
 
+    /// Create a new hybrid semaphore builder.
+    ///
+    /// The queue behaves as FIFO while at most `lifo_above` tasks are waiting, and
+    /// switches to LIFO once it grows beyond that. This keeps FIFO's predictability
+    /// under light load while degrading like LIFO under contention.
+    ///
+    /// Note: under sustained overload the FIFO backlog can starve, so this gives up
+    /// FIFO's no-starvation guarantee.
+    pub fn hybrid(lifo_above: usize) -> Builder<Hybrid> {
+        Builder {
+            order: Hybrid { lifo_above },
+            closeable: PhantomData,
+        }
+    }
+
     /// Create a new semaphore builder with a custom [`Order`].
     ///
     /// Use this to plug in an externally-defined ordering policy (for example a
@@ -443,7 +458,7 @@ where
 /// The generics on this semaphore are as follows:
 /// * `S`: The [`SemaphoreState`] value that this semaphore is backed by.
 /// * `C`: A type-safe configuration value for whether [`Semaphore::close`] can be called, and whether [`Semaphore::acquire`] can fail.
-/// * `O`: The queue [`Order`] policy (FIFO/LIFO/custom).
+/// * `O`: The queue [`Order`] policy (FIFO/LIFO/hybrid/custom).
 pub struct Semaphore<S, C = Uncloseable, O = FairOrder>
 where
     S: SemaphoreState + ?Sized,

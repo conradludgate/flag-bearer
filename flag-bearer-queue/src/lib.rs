@@ -21,7 +21,7 @@ pub mod order;
 
 mod loom;
 
-pub use order::{FairOrder, Order};
+pub use order::{FairOrder, Hybrid, Order};
 
 /// A queue that manages the acquisition of permits from a [`SemaphoreState`], or queues tasks
 /// if no permits are available.
