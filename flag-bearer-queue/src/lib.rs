@@ -17,8 +17,11 @@ use pin_list::PinList;
 
 pub mod acquire;
 pub mod closeable;
+pub mod order;
 
 mod loom;
+
+pub use order::{FairOrder, Order};
 
 /// A queue that manages the acquisition of permits from a [`SemaphoreState`], or queues tasks
 /// if no permits are available.
@@ -26,6 +29,7 @@ mod loom;
 pub struct SemaphoreQueue<
     S: SemaphoreState<Params = Params, Permit = Permit> + ?Sized,
     C: IsCloseable,
+    O = FairOrder,
     Params = <S as SemaphoreState>::Params,
     Permit = <S as SemaphoreState>::Permit,
 > {
@@ -35,11 +39,14 @@ pub struct SemaphoreQueue<
     /// `with_state` closure) while we held the state, which may have left `state`
     /// half-updated. We can't tell a clean panic from a corrupting one, so — like
     /// [`std::sync::Mutex`] — we assume the worst until `clear_poison`.
-    /// `state` must stay the last field so it can be `?Sized`.
     poisoned: bool,
     /// Number of tasks currently waiting in `queue`. Tracked here because the
-    /// intrusive list has no `len()`.
+    /// intrusive list has no `len()`, and size-dependent [`Order`]s need it.
     len: usize,
+    /// The ordering policy. A stateful policy (e.g. a randomized one) lives here so
+    /// it's shared across acquisitions and mutated under the lock.
+    order: O,
+    /// `state` must stay the last field so it can be `?Sized`.
     state: S,
 }
 
@@ -54,8 +61,8 @@ impl Drop for PoisonOnUnwind<'_> {
     }
 }
 
-impl<S: SemaphoreState + core::fmt::Debug, C: IsCloseable> core::fmt::Debug
-    for SemaphoreQueue<S, C>
+impl<S: SemaphoreState + core::fmt::Debug, C: IsCloseable, O> core::fmt::Debug
+    for SemaphoreQueue<S, C, O>
 {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         let mut d = f.debug_struct("SemaphoreQueue");
@@ -84,11 +91,12 @@ type PinQueue<Params, Permit, C> = dyn pin_list::Types<
         Unprotected = (),
     >;
 
-impl<S: SemaphoreState, C: IsCloseable> SemaphoreQueue<S, C> {
-    /// Construct a new semaphore queue, with the given [`SemaphoreState`].
-    pub fn new(state: S) -> Self {
+impl<S: SemaphoreState, C: IsCloseable, O> SemaphoreQueue<S, C, O> {
+    /// Construct a new semaphore queue, with the given [`SemaphoreState`] and [`Order`].
+    pub fn new(state: S, order: O) -> Self {
         Self {
             state,
+            order,
             poisoned: false,
             len: 0,
             // Safety: during acquire, we ensure that nodes in this queue
@@ -98,7 +106,7 @@ impl<S: SemaphoreState, C: IsCloseable> SemaphoreQueue<S, C> {
     }
 }
 
-impl<S: SemaphoreState + ?Sized, C: IsCloseable> SemaphoreQueue<S, C> {
+impl<S: SemaphoreState + ?Sized, C: IsCloseable, O> SemaphoreQueue<S, C, O> {
     /// Access the state with mutable access.
     ///
     /// This gives direct access to the state, be careful not to
@@ -184,7 +192,7 @@ impl<S: SemaphoreState + ?Sized, C: IsCloseable> SemaphoreQueue<S, C> {
     }
 }
 
-impl<S: SemaphoreState + ?Sized> SemaphoreQueue<S, Closeable> {
+impl<S: SemaphoreState + ?Sized, O> SemaphoreQueue<S, Closeable, O> {
     /// Close the semaphore queue.
     ///
     /// All tasks currently waiting to acquire a token will immediately stop.
@@ -238,15 +246,16 @@ mod loom_tests {
             use std::sync::Arc;
 
             let s = Arc::new(crate::loom::Mutex::<parking_lot::RawMutex, _>::new(
-                SemaphoreQueue::<NeverSucceeds, Closeable>::new(NeverSucceeds),
+                SemaphoreQueue::<NeverSucceeds, Closeable>::new(
+                    NeverSucceeds,
+                    crate::FairOrder::Fifo,
+                ),
             ));
 
             let s2 = s.clone();
             let handle = loom::thread::spawn(move || {
                 loom::future::block_on(async move {
-                    SemaphoreQueue::acquire(&s2, (), crate::acquire::FairOrder::Fifo)
-                        .await
-                        .unwrap_err()
+                    SemaphoreQueue::acquire(&s2, ()).await.unwrap_err()
                 })
             });
 

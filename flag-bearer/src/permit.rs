@@ -1,16 +1,18 @@
-use crate::{IsCloseable, Semaphore, SemaphoreState, Uncloseable, drop_wrapper::DropWrapper};
+use crate::{
+    FairOrder, IsCloseable, Semaphore, SemaphoreState, Uncloseable, drop_wrapper::DropWrapper,
+};
 
 /// The drop-guard for semaphore permits.
 /// Will ensure the permit is released when dropped.
-pub struct Permit<'a, S, C = Uncloseable>
+pub struct Permit<'a, S, C = Uncloseable, O = FairOrder>
 where
     S: SemaphoreState + ?Sized,
     C: IsCloseable,
 {
-    inner: DropWrapper<SemWrapper<'a, S, C>>,
+    inner: DropWrapper<SemWrapper<'a, S, C, O>>,
 }
 
-impl<S, C> core::fmt::Debug for Permit<'_, S, C>
+impl<S, C, O> core::fmt::Debug for Permit<'_, S, C, O>
 where
     S: SemaphoreState + ?Sized,
     C: IsCloseable,
@@ -23,7 +25,7 @@ where
     }
 }
 
-impl<S, C> core::ops::Deref for Permit<'_, S, C>
+impl<S, C, O> core::ops::Deref for Permit<'_, S, C, O>
 where
     S: SemaphoreState + ?Sized,
     C: IsCloseable,
@@ -34,7 +36,7 @@ where
     }
 }
 
-impl<S, C> core::ops::DerefMut for Permit<'_, S, C>
+impl<S, C, O> core::ops::DerefMut for Permit<'_, S, C, O>
 where
     S: SemaphoreState + ?Sized,
     C: IsCloseable,
@@ -44,7 +46,7 @@ where
     }
 }
 
-impl<'a, S, C> Permit<'a, S, C>
+impl<'a, S, C, O> Permit<'a, S, C, O>
 where
     S: SemaphoreState + ?Sized,
     C: IsCloseable,
@@ -55,14 +57,14 @@ where
     /// It can be used to introduce new permits to the semaphore if desired, or it can be
     /// paired with [`Permit::take`] for niche use-cases where the semaphore lifetime
     /// gets in the way.
-    pub fn out_of_thin_air(sem: &'a Semaphore<S, C>, permit: S::Permit) -> Self {
+    pub fn out_of_thin_air(sem: &'a Semaphore<S, C, O>, permit: S::Permit) -> Self {
         Self {
             inner: DropWrapper::new(SemWrapper { sem }, permit),
         }
     }
 
     /// Get access to the associated semaphore
-    pub fn semaphore(this: &Self) -> &'a Semaphore<S, C> {
+    pub fn semaphore(this: &Self) -> &'a Semaphore<S, C, O> {
         this.inner.s.sem
     }
 
@@ -72,12 +74,12 @@ where
     }
 }
 
-struct SemWrapper<'a, S: SemaphoreState + ?Sized, C: IsCloseable> {
-    sem: &'a Semaphore<S, C>,
+struct SemWrapper<'a, S: SemaphoreState + ?Sized, C: IsCloseable, O> {
+    sem: &'a Semaphore<S, C, O>,
 }
 
-impl<S: SemaphoreState + ?Sized, C: IsCloseable> crate::drop_wrapper::Drop2
-    for SemWrapper<'_, S, C>
+impl<S: SemaphoreState + ?Sized, C: IsCloseable, O> crate::drop_wrapper::Drop2
+    for SemWrapper<'_, S, C, O>
 {
     type T = S::Permit;
 
