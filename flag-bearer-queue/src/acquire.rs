@@ -54,7 +54,10 @@ pin_project_lite::pin_project! {
                         // We were still queued and have now left the queue. If we were
                         // a head-of-line blocker, the waiters behind us may now be
                         // serviceable, so re-check.
-                        NodeData::Linked(_) => state.check(),
+                        NodeData::Linked(_) => {
+                            state.len -= 1;
+                            state.check();
+                        }
                         NodeData::Removed(Err(_closed)) => {}
                     }
                 }
@@ -110,6 +113,7 @@ impl<S: SemaphoreState + ?Sized, C: IsCloseable, R: RawMutex> Future for Acquire
                         FairOrder::Lifo => queue.push_front(node, (Some(params), waker), ()),
                         FairOrder::Fifo => queue.push_back(node, (Some(params), waker), ()),
                     };
+                    state.len += 1;
                     return Poll::Pending;
                 }
             }

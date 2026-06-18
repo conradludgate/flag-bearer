@@ -37,6 +37,9 @@ pub struct SemaphoreQueue<
     /// [`std::sync::Mutex`] — we assume the worst until `clear_poison`.
     /// `state` must stay the last field so it can be `?Sized`.
     poisoned: bool,
+    /// Number of tasks currently waiting in `queue`. Tracked here because the
+    /// intrusive list has no `len()`.
+    len: usize,
     state: S,
 }
 
@@ -87,6 +90,7 @@ impl<S: SemaphoreState, C: IsCloseable> SemaphoreQueue<S, C> {
         Self {
             state,
             poisoned: false,
+            len: 0,
             // Safety: during acquire, we ensure that nodes in this queue
             // will never attempt to use a different queue to read the nodes.
             queue: Ok(PinList::new(unsafe { pin_list::id::DebugChecked::new() })),
@@ -136,7 +140,10 @@ impl<S: SemaphoreState + ?Sized, C: IsCloseable> SemaphoreQueue<S, C> {
 
             match result {
                 Ok(permit) => match leader.remove_current(Ok(permit)) {
-                    Ok((_, waker)) => waker.wake(),
+                    Ok((_, waker)) => {
+                        waker.wake();
+                        self.len -= 1;
+                    }
                     // Safety: with protected_mut, we have just made sure it is in the list
                     Err(_) => unsafe { unreachable_unchecked() },
                 },
@@ -203,6 +210,7 @@ impl<S: SemaphoreState + ?Sized> SemaphoreQueue<S, Closeable> {
         // all linked nodes are removed.
         // If we did this early, we could panic and not dequeue every node.
         self.queue = Err(());
+        self.len = 0;
     }
 }
 
