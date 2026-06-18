@@ -8,9 +8,11 @@ publish = false
 flag-bearer = { path = "../flag-bearer", version = "0.1.0-rc.8" }
 pollster = "0.4"
 hdrhistogram = "7.5.4"
+rand = { version = "0.10", default-features = false }
+rand_xoshiro = "0.8"
 
 [dev-dependencies]
-tokio = { version = "1", features = ["macros", "rt", "rt-multi-thread", "sync", "time"] }
+tokio = { version = "1", features = ["macros", "rt", "rt-multi-thread", "sync", "time", "test-util"] }
 futures-testing = { git = "https://github.com/conradludgate/futures-testing" }
 futures-util = { version = "0.3", default-features = false }
 arbitrary = { version = "1", features = ["derive"] }
