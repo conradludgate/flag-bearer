@@ -299,10 +299,9 @@ mod permit;
 
 pub use flag_bearer_core::SemaphoreState;
 
-use flag_bearer_queue::{
-    SemaphoreQueue,
-    acquire::{FairOrder, Fairness},
-};
+use flag_bearer_queue::SemaphoreQueue;
+
+pub use flag_bearer_queue::{FairOrder, Hybrid, Order};
 
 pub use flag_bearer_queue::acquire::AcquireError;
 /// The error returned by [`try_acquire`](Semaphore::try_acquire)
@@ -380,46 +379,72 @@ use flag_bearer_mutex::RawMutex as DefaultRawMutex;
 use flag_bearer_mutex::lock_api::Mutex;
 
 /// A Builder for [`Semaphore`]s.
-pub struct Builder<C = Uncloseable>
+pub struct Builder<O = FairOrder, C = Uncloseable>
 where
     C: IsCloseable,
 {
-    order: FairOrder,
+    order: O,
     closeable: PhantomData<C>,
 }
 
 impl Builder {
-    /// Create a new first-in-first-out semaphore builder
-    pub fn fifo() -> Self {
-        Self {
+    /// Create a new first-in-first-out semaphore builder.
+    pub fn fifo() -> Builder<FairOrder> {
+        Builder {
             order: FairOrder::Fifo,
             closeable: PhantomData,
         }
     }
 
-    /// Create a new last-in-first-out semaphore builder
-    pub fn lifo() -> Self {
-        Self {
+    /// Create a new last-in-first-out semaphore builder.
+    pub fn lifo() -> Builder<FairOrder> {
+        Builder {
             order: FairOrder::Lifo,
             closeable: PhantomData,
         }
     }
 
-    /// The semaphore this builder constructs will be closeable.
-    pub fn closeable(self) -> Builder<Closeable> {
+    /// Create a new hybrid semaphore builder.
+    ///
+    /// The queue behaves as FIFO while at most `lifo_above` tasks are waiting, and
+    /// switches to LIFO once it grows beyond that. This keeps FIFO's predictability
+    /// under light load while degrading like LIFO under contention.
+    ///
+    /// Note: under sustained overload the FIFO backlog can starve, so this gives up
+    /// FIFO's no-starvation guarantee.
+    pub fn hybrid(lifo_above: usize) -> Builder<Hybrid> {
         Builder {
-            order: self.order,
+            order: Hybrid { lifo_above },
+            closeable: PhantomData,
+        }
+    }
+
+    /// Create a new semaphore builder with a custom [`Order`].
+    ///
+    /// Use this to plug in an externally-defined ordering policy (for example a
+    /// randomized order that owns its own RNG).
+    pub fn with_order<O: Order>(order: O) -> Builder<O> {
+        Builder {
+            order,
             closeable: PhantomData,
         }
     }
 }
 
-impl<C> Builder<C>
+impl<O, C> Builder<O, C>
 where
     C: IsCloseable,
 {
+    /// The semaphore this builder constructs will be closeable.
+    pub fn closeable(self) -> Builder<O, Closeable> {
+        Builder {
+            order: self.order,
+            closeable: PhantomData,
+        }
+    }
+
     /// Build the [`Semaphore`] with the provided initial state.
-    pub fn with_state<S: SemaphoreState>(self, state: S) -> Semaphore<S, C> {
+    pub fn with_state<S: SemaphoreState>(self, state: S) -> Semaphore<S, C, O> {
         Semaphore::new_inner(state, self.order)
     }
 }
@@ -433,29 +458,28 @@ where
 /// The generics on this semaphore are as follows:
 /// * `S`: The [`SemaphoreState`] value that this semaphore is backed by.
 /// * `C`: A type-safe configuration value for whether [`Semaphore::close`] can be called, and whether [`Semaphore::acquire`] can fail.
-pub struct Semaphore<S, C = Uncloseable>
+/// * `O`: The queue [`Order`] policy (FIFO/LIFO/hybrid/custom).
+pub struct Semaphore<S, C = Uncloseable, O = FairOrder>
 where
     S: SemaphoreState + ?Sized,
     C: IsCloseable,
 {
-    order: FairOrder,
-    state: Mutex<DefaultRawMutex, SemaphoreQueue<S, C>>,
+    state: Mutex<DefaultRawMutex, SemaphoreQueue<S, C, O>>,
 }
 
-impl<S: SemaphoreState, C: IsCloseable> Semaphore<S, C> {
-    fn new_inner(state: S, order: FairOrder) -> Self {
-        let state = SemaphoreQueue::new(state);
+impl<S: SemaphoreState, C: IsCloseable, O> Semaphore<S, C, O> {
+    fn new_inner(state: S, order: O) -> Self {
         Self {
-            state: Mutex::new(state),
-            order,
+            state: Mutex::new(SemaphoreQueue::new(state, order)),
         }
     }
 }
 
-impl<S: SemaphoreState + core::fmt::Debug> core::fmt::Debug for Semaphore<S> {
+impl<S: SemaphoreState + core::fmt::Debug, C: IsCloseable, O> core::fmt::Debug
+    for Semaphore<S, C, O>
+{
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         let mut d = f.debug_struct("Semaphore");
-        d.field("order", &self.order);
         match self.state.try_lock() {
             Some(guard) => {
                 d.field("queue", &*guard);
@@ -468,23 +492,25 @@ impl<S: SemaphoreState + core::fmt::Debug> core::fmt::Debug for Semaphore<S> {
     }
 }
 
-impl<S> Semaphore<S, Uncloseable>
+impl<S, O> Semaphore<S, Uncloseable, O>
 where
     S: SemaphoreState + ?Sized,
+    O: Order,
 {
     /// Acquire a new permit fairly with the given parameters.
     ///
     /// If a permit is not immediately available, this task will
     /// join a queue.
-    pub async fn must_acquire(&self, params: S::Params) -> Permit<'_, S, Uncloseable> {
+    pub async fn must_acquire(&self, params: S::Params) -> Permit<'_, S, Uncloseable, O> {
         self.acquire(params).await.unwrap_or_else(|e| e.never())
     }
 }
 
-impl<S, C> Semaphore<S, C>
+impl<S, C, O> Semaphore<S, C, O>
 where
     S: SemaphoreState + ?Sized,
     C: IsCloseable,
+    O: Order,
 {
     /// Acquire a new permit fairly with the given parameters.
     ///
@@ -497,8 +523,8 @@ where
     pub async fn acquire(
         &self,
         params: S::Params,
-    ) -> Result<Permit<'_, S, C>, C::AcquireError<S::Params>> {
-        let acquire = flag_bearer_queue::SemaphoreQueue::acquire(&self.state, params, self.order);
+    ) -> Result<Permit<'_, S, C, O>, C::AcquireError<S::Params>> {
+        let acquire = flag_bearer_queue::SemaphoreQueue::acquire(&self.state, params);
         Ok(Permit::out_of_thin_air(self, acquire.await?))
     }
 
@@ -520,9 +546,9 @@ where
     pub fn try_acquire(
         &self,
         params: S::Params,
-    ) -> Result<Permit<'_, S, C>, TryAcquireError<S::Params, C>> {
+    ) -> Result<Permit<'_, S, C, O>, TryAcquireError<S::Params, C>> {
         let mut state = self.state.lock();
-        let permit = state.try_acquire(params, Fairness::Fair(self.order))?;
+        let permit = state.try_acquire(params, true)?;
         Ok(Permit::out_of_thin_air(self, permit))
     }
 
@@ -540,14 +566,14 @@ where
     pub fn try_acquire_unfair(
         &self,
         params: S::Params,
-    ) -> Result<Permit<'_, S, C>, TryAcquireError<S::Params, C>> {
+    ) -> Result<Permit<'_, S, C, O>, TryAcquireError<S::Params, C>> {
         let mut state = self.state.lock();
-        let permit = state.try_acquire(params, Fairness::Unfair)?;
+        let permit = state.try_acquire(params, false)?;
         Ok(Permit::out_of_thin_air(self, permit))
     }
 }
 
-impl<S, C> Semaphore<S, C>
+impl<S, C, O> Semaphore<S, C, O>
 where
     S: SemaphoreState + ?Sized,
     C: IsCloseable,
@@ -594,7 +620,7 @@ where
     }
 }
 
-impl<S> Semaphore<S, Closeable>
+impl<S, O> Semaphore<S, Closeable, O>
 where
     S: SemaphoreState + ?Sized,
 {
@@ -629,7 +655,7 @@ mod test {
         let s = std::format!("{s:?}");
         assert_eq!(
             s,
-            "Semaphore { order: Fifo, queue: SemaphoreQueue { state: Dummy, .. } }"
+            "Semaphore { queue: SemaphoreQueue { state: Dummy, .. } }"
         );
     }
 

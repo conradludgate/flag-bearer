@@ -8,6 +8,7 @@ use lock_api::RawMutex;
 use pin_list::{Node, NodeData};
 
 use crate::closeable::{IsCloseable, Uncloseable};
+use crate::order::Order;
 use crate::{SemaphoreQueue, SemaphoreState};
 
 use super::PinQueue;
@@ -16,7 +17,7 @@ use crate::loom::Mutex;
 
 pin_project_lite::pin_project! {
     /// A [`Future`] that acquires a permit from a [`SemaphoreQueue`].
-    pub struct Acquire<'a, S, C, R>
+    pub struct Acquire<'a, S, C, O, R>
     where
         S: ?Sized,
         S: SemaphoreState,
@@ -25,12 +26,11 @@ pin_project_lite::pin_project! {
     {
         #[pin]
         node: Node<PinQueue<S::Params, S::Permit, C>>,
-        order: FairOrder,
-        state: &'a Mutex<R, SemaphoreQueue<S, C>>,
+        state: &'a Mutex<R, SemaphoreQueue<S, C, O>>,
         params: Option<S::Params>,
     }
 
-    impl<S, C, R> PinnedDrop for Acquire<'_, S, C, R>
+    impl<S, C, O, R> PinnedDrop for Acquire<'_, S, C, O, R>
     where
         S: ?Sized,
         S: SemaphoreState,
@@ -54,7 +54,10 @@ pin_project_lite::pin_project! {
                         // We were still queued and have now left the queue. If we were
                         // a head-of-line blocker, the waiters behind us may now be
                         // serviceable, so re-check.
-                        NodeData::Linked(_) => state.check(),
+                        NodeData::Linked(_) => {
+                            state.len -= 1;
+                            state.check();
+                        }
                         NodeData::Removed(Err(_closed)) => {}
                     }
                 }
@@ -72,7 +75,9 @@ pin_project_lite::pin_project! {
     }
 }
 
-impl<S: SemaphoreState + ?Sized, C: IsCloseable, R: RawMutex> Future for Acquire<'_, S, C, R> {
+impl<S: SemaphoreState + ?Sized, C: IsCloseable, O: Order, R: RawMutex> Future
+    for Acquire<'_, S, C, O, R>
+{
     type Output = Result<S::Permit, C::AcquireError<S::Params>>;
 
     fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
@@ -84,32 +89,30 @@ impl<S: SemaphoreState + ?Sized, C: IsCloseable, R: RawMutex> Future for Acquire
             let params = this.params.take().unwrap();
             let node = this.node.as_mut();
 
-            match state.try_acquire(params, Fairness::Fair(*this.order)) {
-                Ok(permit) => return Poll::Ready(Ok(permit)),
-                Err(TryAcquireError::Closed(params)) => return Poll::Ready(Err(params)),
+            match state.acquire_or_enqueue(params, true) {
+                Outcome::Acquired(permit) => return Poll::Ready(Ok(permit)),
+                Outcome::Closed(err) => return Poll::Ready(Err(err)),
                 // The async acquire's error type can't carry poison (it is
                 // uninhabited for uncloseable semaphores, keeping `must_acquire`
                 // infallible), so poison is a panic on this path. Callers that
                 // want to observe poison should use `try_acquire`.
-                Err(TryAcquireError::Poisoned(_params)) => {
-                    panic!(
-                        "the semaphore is poisoned: a previous SemaphoreState::acquire call panicked"
-                    )
-                }
-                Err(TryAcquireError::NoPermits(params)) => {
+                Outcome::Poisoned(_params) => panic!(
+                    "the semaphore is poisoned: a previous SemaphoreState::acquire call panicked"
+                ),
+                Outcome::Enqueue { front, params } => {
                     let queue = match &mut state.queue {
                         Ok(queue) => queue,
-                        // Safety: if the queue was closed, we would get a `Closed` error type.
-                        // It was not closed, thus it still isn't closed.
+                        // Safety: an `Enqueue` outcome is only returned for an open queue.
                         Err(_closed) => unsafe { core::hint::unreachable_unchecked() },
                     };
 
-                    // no permit or we are not the leader, so we register into the queue.
                     let waker = cx.waker().clone();
-                    match *this.order {
-                        FairOrder::Lifo => queue.push_front(node, (Some(params), waker), ()),
-                        FairOrder::Fifo => queue.push_back(node, (Some(params), waker), ()),
-                    };
+                    if front {
+                        queue.push_front(node, (Some(params), waker), ());
+                    } else {
+                        queue.push_back(node, (Some(params), waker), ());
+                    }
+                    state.len += 1;
                     return Poll::Pending;
                 }
             }
@@ -137,88 +140,85 @@ impl<S: SemaphoreState + ?Sized, C: IsCloseable, R: RawMutex> Future for Acquire
     }
 }
 
-#[derive(Debug, Clone, Copy)]
-#[non_exhaustive]
-/// The order of which [`Acquire`] should enter the queue.
-pub enum FairOrder {
-    /// Last in, first out.
-    /// Increases tail latencies, but can have better average performance.
-    Lifo,
-    /// First in, first out.
-    /// Fairer option, but can have cascading failures if queue processing is slow.
-    Fifo,
+/// The result of an acquisition attempt that doesn't itself touch the queue list.
+enum Outcome<S: SemaphoreState + ?Sized, C: IsCloseable> {
+    /// A permit was granted immediately.
+    Acquired(S::Permit),
+    /// The semaphore is closed.
+    Closed(C::AcquireError<S::Params>),
+    /// The semaphore is poisoned.
+    Poisoned(S::Params),
+    /// No permit available now; the caller should enqueue at the indicated end.
+    Enqueue { front: bool, params: S::Params },
 }
 
-#[derive(Debug, Clone, Copy)]
-#[non_exhaustive]
-/// Which fairness property [`SemaphoreQueue::try_acquire`] should respect
-pub enum Fairness {
-    Fair(FairOrder),
-    Unfair,
-}
-
-impl<S: SemaphoreState + ?Sized, C: IsCloseable> SemaphoreQueue<S, C> {
-    /// Acquire a permit, or join the queue if not currently available.
+impl<S: SemaphoreState + ?Sized, C: IsCloseable, O: Order> SemaphoreQueue<S, C, O> {
+    /// Acquire a permit, or join the queue if one is not currently available.
     ///
-    /// * If the order is [`FairOrder::Lifo`], then we enqueue at the front of the queue.
-    /// * If the order is [`FairOrder::Fifo`], then we enqueue at the back of the queue.
+    /// The queue's [`Order`] decides which end a new waiter joins; permits are
+    /// always handed out from the front.
     #[inline]
     pub fn acquire<R: RawMutex>(
         this: &Mutex<R, Self>,
         params: S::Params,
-        order: FairOrder,
-    ) -> Acquire<'_, S, C, R> {
+    ) -> Acquire<'_, S, C, O, R> {
         Acquire {
             node: Node::new(),
-            order,
             state: this,
             params: Some(params),
         }
     }
 
-    /// Try acquire a permit without joining the queue.
+    /// Try to acquire a permit without joining the queue.
     ///
-    /// * If the fairness is [`Fairness::Unfair`], or [`Fairness::Fair(FairOrder::Lifo)`](FairOrder::Lifo), then we always try acquire a permit.
-    /// * If the fairness is [`Fairness::Fair(FairOrder::Fifo)`](FairOrder::Fifo), then we only try acquire a permit if the queue is empty.
+    /// When `fair`, the queue's [`Order`] decides whether this caller may take a
+    /// permit ahead of any waiters — it can if the order would place it at the
+    /// front (e.g. LIFO), or if the queue is empty. When not `fair`, it always tries.
     #[inline]
     pub fn try_acquire(
         &mut self,
         params: S::Params,
-        fairness: Fairness,
+        fair: bool,
     ) -> Result<S::Permit, TryAcquireError<S::Params, C>> {
-        if self.is_poisoned() {
-            return Err(TryAcquireError::Poisoned(params));
+        match self.acquire_or_enqueue(params, fair) {
+            Outcome::Acquired(permit) => Ok(permit),
+            Outcome::Closed(err) => Err(TryAcquireError::Closed(err)),
+            Outcome::Poisoned(params) => Err(TryAcquireError::Poisoned(params)),
+            Outcome::Enqueue { params, .. } => Err(TryAcquireError::NoPermits(params)),
         }
+    }
 
-        let queue = match &mut self.queue {
-            Ok(queue) => queue,
-            Err(_closed) => {
-                return Err(TryAcquireError::Closed(C::new_err(params)));
-            }
+    /// Grant a permit if we may, otherwise report which end the caller should queue
+    /// at. Consults the [`Order`] exactly once, so a stateful order draws once per
+    /// acquisition.
+    fn acquire_or_enqueue(&mut self, params: S::Params, fair: bool) -> Outcome<S, C> {
+        if self.poisoned {
+            return Outcome::Poisoned(params);
+        }
+        let empty = match &self.queue {
+            Ok(queue) => queue.is_empty(),
+            Err(_closed) => return Outcome::Closed(C::new_err(params)),
         };
 
-        let is_leader = match fairness {
-            // if first-in-first-out, we are only the leader if the queue is empty.
-            Fairness::Fair(FairOrder::Fifo) => queue.is_empty(),
-            // if last-in-first-out, we are the last in and thus the leader.
-            Fairness::Fair(FairOrder::Lifo) => true,
-            // if unfair, then we don't care who the leader is.
-            Fairness::Unfair => true,
+        // A single ordering decision: would we go to the front, and are we therefore
+        // the leader (front, or nobody ahead of us)? Unfair callers always try.
+        let front = if fair {
+            self.order.enqueue_front(self.len)
+        } else {
+            true
         };
-
-        if !is_leader {
-            return Err(TryAcquireError::NoPermits(params));
+        if !(front || empty) {
+            return Outcome::Enqueue { front, params };
         }
 
-        // A panic in `acquire` may leave `state` half-updated (no node is
-        // involved here, so this is the only record), so poison if it unwinds.
+        // We're the leader. A panic in `acquire` may leave `state` half-updated,
+        // so poison if it unwinds.
         let guard = crate::PoisonOnUnwind(&mut self.poisoned);
         let result = self.state.acquire(params);
         core::mem::forget(guard);
-
         match result {
-            Ok(permit) => Ok(permit),
-            Err(p) => Err(TryAcquireError::NoPermits(p)),
+            Ok(permit) => Outcome::Acquired(permit),
+            Err(params) => Outcome::Enqueue { front, params },
         }
     }
 }
