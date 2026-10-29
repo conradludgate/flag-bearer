@@ -54,5 +54,10 @@ pub trait SemaphoreState {
     ///
     /// Note: This is not guaranteed to be called for every acquire call.
     /// Permits can be modified or forgotten, or created at will.
+    ///
+    /// # Panics
+    ///
+    /// As with [`acquire`](Self::acquire), a panic may leave the state
+    /// half-updated, so the semaphore is poisoned if this method unwinds.
     fn release(&mut self, permit: Self::Permit);
 }

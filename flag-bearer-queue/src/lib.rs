@@ -158,8 +158,9 @@ struct QueueState<
     // access only this list. Err is stored only after all nodes are removed;
     // an open list is never replaced with another list.
     queue: Result<PinList<PinQueue<Params, Permit, C>>, C::Closed<()>>,
-    /// Set if a panic ever escaped user code (`SemaphoreState::acquire` or a
-    /// `with_state` closure) while we held the state, which may have left `state`
+    /// Set if a panic ever escaped user code (`SemaphoreState::acquire`,
+    /// `SemaphoreState::release` or a `with_state` closure) while we held the state,
+    /// which may have left `state`
     /// half-updated. We can't tell a clean panic from a corrupting one, so — like
     /// [`std::sync::Mutex`] — we assume the worst until `clear_poison`.
     poisoned: bool,
@@ -257,8 +258,8 @@ impl<S: SemaphoreState + ?Sized, C: IsCloseable, O> QueueState<S, C, O> {
             match result {
                 Ok(permit) => match leader.remove_current(Ok(permit)) {
                     Ok((_, waker)) => {
-                        waker.wake();
                         self.len -= 1;
+                        waker.wake();
                     }
                     // SAFETY: protected_mut established that the cursor is on
                     // a node. acquire can mutate only S and cannot replace the
@@ -280,8 +281,9 @@ impl<S: SemaphoreState + ?Sized, C: IsCloseable, O> QueueState<S, C, O> {
 
     /// Check if the queue has been poisoned.
     ///
-    /// A queue becomes poisoned if a panic unwinds out of [`SemaphoreState::acquire`]
-    /// or a [`with_state`](Self::with_state) closure, which may have left the state
+    /// A queue becomes poisoned if a panic unwinds out of [`SemaphoreState::acquire`],
+    /// [`SemaphoreState::release`] or a [`with_state`](Self::with_state) closure,
+    /// which may have left the state
     /// half-updated. Poisoning persists until [`clear_poison`](Self::clear_poison).
     /// A poisoned queue stops granting permits; new acquire attempts surface the
     /// poison rather than build on a corrupt state.
@@ -321,6 +323,9 @@ impl<S: SemaphoreState + ?Sized, O> QueueState<S, Closeable, O> {
         let mut cursor = queue.cursor_front_mut();
         while cursor.remove_current_with_or(
             |(params, waker)| {
+                // The node is already unlinked when this closure runs. Keep
+                // the count consistent even if the caller's waker panics.
+                self.len -= 1;
                 waker.wake();
 
                 Err(params)
@@ -334,7 +339,7 @@ impl<S: SemaphoreState + ?Sized, O> QueueState<S, Closeable, O> {
         // all linked nodes are removed.
         // If we did this early, we could panic and not dequeue every node.
         self.queue = Err(());
-        self.len = 0;
+        debug_assert_eq!(self.len, 0);
     }
 }
 

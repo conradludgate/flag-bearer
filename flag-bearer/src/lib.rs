@@ -585,7 +585,8 @@ where
 
     /// Check if the semaphore is poisoned.
     ///
-    /// A semaphore becomes poisoned if a call to [`SemaphoreState::acquire`] panics.
+    /// A semaphore becomes poisoned if a call to [`SemaphoreState::acquire`],
+    /// [`SemaphoreState::release`] or a [`with_state`](Self::with_state) closure panics.
     /// The semaphore stops handing out permits:
     /// * [`try_acquire`](Semaphore::try_acquire) returns [`TryAcquireError::Poisoned`].
     /// * [`acquire`](Semaphore::acquire) panics (its error type can't represent poison,
