@@ -52,8 +52,7 @@ pin_project_lite::pin_project! {
                     match node.reset(queue).0 {
                         // We were granted a permit but never claimed it; return it.
                         NodeData::Removed(Ok(permit)) => {
-                            state.state.release(permit);
-                            state.check();
+                            state.with_state(|state| state.release(permit));
                         }
                         // We were still queued and have now left the queue. If we were
                         // a head-of-line blocker, the waiters behind us may now be
@@ -74,7 +73,7 @@ pin_project_lite::pin_project! {
                     // so it cannot be taken or dropped again as initialized.
                     let (permit, ()) = unsafe { node.take_removed_unchecked() };
                     if let Ok(permit) = permit {
-                        state.state.release(permit);
+                        state.with_state(|state| state.release(permit));
                     }
                 }
             }
