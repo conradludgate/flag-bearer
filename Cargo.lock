@@ -163,6 +163,7 @@ dependencies = [
  "cfg-if",
  "flag-bearer",
  "flag-bearer-core",
+ "flag-bearer-mutex",
  "lock_api",
  "loom",
  "parking_lot",

@@ -376,7 +376,6 @@ pub use flag_bearer_queue::closeable::{Closeable, IsCloseable, Uncloseable};
 pub use permit::Permit;
 
 use flag_bearer_mutex::RawMutex as DefaultRawMutex;
-use flag_bearer_mutex::lock_api::Mutex;
 
 /// A Builder for [`Semaphore`]s.
 pub struct Builder<O = FairOrder, C = Uncloseable>
@@ -464,13 +463,13 @@ where
     S: SemaphoreState + ?Sized,
     C: IsCloseable,
 {
-    state: Mutex<DefaultRawMutex, SemaphoreQueue<S, C, O>>,
+    state: SemaphoreQueue<DefaultRawMutex, S, C, O>,
 }
 
 impl<S: SemaphoreState, C: IsCloseable, O> Semaphore<S, C, O> {
     fn new_inner(state: S, order: O) -> Self {
         Self {
-            state: Mutex::new(SemaphoreQueue::new(state, order)),
+            state: SemaphoreQueue::new(state, order),
         }
     }
 }
@@ -480,14 +479,7 @@ impl<S: SemaphoreState + core::fmt::Debug, C: IsCloseable, O> core::fmt::Debug
 {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         let mut d = f.debug_struct("Semaphore");
-        match self.state.try_lock() {
-            Some(guard) => {
-                d.field("queue", &*guard);
-            }
-            None => {
-                d.field("queue", &format_args!("<locked>"));
-            }
-        }
+        d.field("queue", &self.state);
         d.finish()
     }
 }
@@ -524,7 +516,7 @@ where
         &self,
         params: S::Params,
     ) -> Result<Permit<'_, S, C, O>, C::AcquireError<S::Params>> {
-        let acquire = flag_bearer_queue::SemaphoreQueue::acquire(&self.state, params);
+        let acquire = self.state.acquire(params);
         Ok(Permit::out_of_thin_air(self, acquire.await?))
     }
 
@@ -547,8 +539,7 @@ where
         &self,
         params: S::Params,
     ) -> Result<Permit<'_, S, C, O>, TryAcquireError<S::Params, C>> {
-        let mut state = self.state.lock();
-        let permit = state.try_acquire(params, true)?;
+        let permit = self.state.try_acquire(params, true)?;
         Ok(Permit::out_of_thin_air(self, permit))
     }
 
@@ -567,8 +558,7 @@ where
         &self,
         params: S::Params,
     ) -> Result<Permit<'_, S, C, O>, TryAcquireError<S::Params, C>> {
-        let mut state = self.state.lock();
-        let permit = state.try_acquire(params, false)?;
+        let permit = self.state.try_acquire(params, false)?;
         Ok(Permit::out_of_thin_air(self, permit))
     }
 }
@@ -585,12 +575,12 @@ where
     /// to peek at the current state, or to modify it, eg to add or
     /// remove permits from the semaphore.
     pub fn with_state<T>(&self, f: impl FnOnce(&mut S) -> T) -> T {
-        self.state.lock().with_state(f)
+        self.state.with_state(f)
     }
 
     /// Check if the semaphore is closed
     pub fn is_closed(&self) -> bool {
-        C::CLOSE && self.state.lock().is_closed()
+        self.state.is_closed()
     }
 
     /// Check if the semaphore is poisoned.
@@ -603,7 +593,7 @@ where
     /// * [`with_state`](Semaphore::with_state) still works, so the (possibly half-updated)
     ///   state can be inspected.
     pub fn is_poisoned(&self) -> bool {
-        self.state.lock().is_poisoned()
+        self.state.is_poisoned()
     }
 
     /// Clear the [`poison`](Semaphore::is_poisoned) flag, letting the semaphore
@@ -616,7 +606,7 @@ where
     /// A blocking [`acquire`](Semaphore::acquire) whose `acquire` impl panicked lost
     /// its params and can never complete; it is skipped until its future is dropped.
     pub fn clear_poison(&self) {
-        self.state.lock().clear_poison();
+        self.state.clear_poison();
     }
 }
 
@@ -629,7 +619,7 @@ where
     /// All tasks currently waiting to acquire a token will immediately stop.
     /// No new acquire attempts will succeed.
     pub fn close(&self) {
-        self.state.lock().close();
+        self.state.close();
     }
 }
 

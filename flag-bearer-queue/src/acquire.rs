@@ -9,7 +9,7 @@ use pin_list::{Node, NodeData};
 
 use crate::closeable::{IsCloseable, Uncloseable};
 use crate::order::Order;
-use crate::{SemaphoreQueue, SemaphoreState};
+use crate::{QueueState, SemaphoreQueue, SemaphoreState};
 
 use super::PinQueue;
 
@@ -25,8 +25,12 @@ pin_project_lite::pin_project! {
         R: RawMutex,
     {
         #[pin]
+        // Safety invariant: While initialized, this node is linked to or has
+        // been removed from state's original list. No other list is used to
+        // inspect or reset it. QueueState::close removes all linked nodes
+        // before discarding that list.
         node: Node<PinQueue<S::Params, S::Permit, C>>,
-        state: &'a Mutex<R, SemaphoreQueue<S, C, O>>,
+        state: &'a Mutex<R, QueueState<S, C, O>>,
         params: Option<S::Params>,
     }
 
@@ -62,9 +66,12 @@ pin_project_lite::pin_project! {
                     }
                 }
                 Err(_closed) => {
-                    // Safety: If the semaphore is closed (meaning we have no queue)
-                    // then there's no way this node could be queued in the queue,
-                    // therefore it must be removed.
+                    // SAFETY: By Acquire::node's invariant this initialized
+                    // node originates from this mutex's list. The private mutex
+                    // prevents replacing QueueState, and QueueState::close's
+                    // safety-usable invariant ensures all nodes are removed
+                    // before queue becomes Err. Taking leaves node initial,
+                    // so it cannot be taken or dropped again as initialized.
                     let (permit, ()) = unsafe { node.take_removed_unchecked() };
                     if let Ok(permit) = permit {
                         state.state.release(permit);
@@ -102,7 +109,9 @@ impl<S: SemaphoreState + ?Sized, C: IsCloseable, O: Order, R: RawMutex> Future
                 Outcome::Enqueue { front, params } => {
                     let queue = match &mut state.queue {
                         Ok(queue) => queue,
-                        // Safety: an `Enqueue` outcome is only returned for an open queue.
+                        // SAFETY: acquire_or_enqueue's safety-usable invariant
+                        // guarantees Enqueue leaves queue open, and no code
+                        // between that call and this match can change it.
                         Err(_closed) => unsafe { core::hint::unreachable_unchecked() },
                     };
 
@@ -126,8 +135,12 @@ impl<S: SemaphoreState + ?Sized, C: IsCloseable, O: Order, R: RawMutex> Future
             return Poll::Pending;
         }
 
-        // Safety: Either there is no queue, then we are guaranteed to be removed from it
-        // Or there was a queue, but we were removed from it anyway (protected_mut returned None).
+        // SAFETY: Acquire::node's invariant ties this node to the original
+        // list in this private mutex. With an open queue, protected_mut returned
+        // None, which pin-list guarantees means removed. With a closed queue,
+        // QueueState::close's safety-usable invariant establishes removal.
+        // The mutex excludes concurrent transitions. Taking leaves node initial
+        // before user code runs or poll returns, preventing a second extraction.
         let (permit, ()) = unsafe { init.take_removed_unchecked() };
         let permit = permit.map_err(|params| {
             C::map_err(params, |params| {
@@ -152,19 +165,16 @@ enum Outcome<S: SemaphoreState + ?Sized, C: IsCloseable> {
     Enqueue { front: bool, params: S::Params },
 }
 
-impl<S: SemaphoreState + ?Sized, C: IsCloseable, O: Order> SemaphoreQueue<S, C, O> {
+impl<R: RawMutex, S: SemaphoreState + ?Sized, C: IsCloseable, O: Order> SemaphoreQueue<R, S, C, O> {
     /// Acquire a permit, or join the queue if one is not currently available.
     ///
     /// The queue's [`Order`] decides which end a new waiter joins; permits are
     /// always handed out from the front.
     #[inline]
-    pub fn acquire<R: RawMutex>(
-        this: &Mutex<R, Self>,
-        params: S::Params,
-    ) -> Acquire<'_, S, C, O, R> {
+    pub fn acquire(&self, params: S::Params) -> Acquire<'_, S, C, O, R> {
         Acquire {
             node: Node::new(),
-            state: this,
+            state: &self.state,
             params: Some(params),
         }
     }
@@ -176,21 +186,30 @@ impl<S: SemaphoreState + ?Sized, C: IsCloseable, O: Order> SemaphoreQueue<S, C, 
     /// front (e.g. LIFO), or if the queue is empty. When not `fair`, it always tries.
     #[inline]
     pub fn try_acquire(
-        &mut self,
+        &self,
         params: S::Params,
         fair: bool,
     ) -> Result<S::Permit, TryAcquireError<S::Params, C>> {
-        match self.acquire_or_enqueue(params, fair) {
-            Outcome::Acquired(permit) => Ok(permit),
-            Outcome::Closed(err) => Err(TryAcquireError::Closed(err)),
-            Outcome::Poisoned(params) => Err(TryAcquireError::Poisoned(params)),
-            Outcome::Enqueue { params, .. } => Err(TryAcquireError::NoPermits(params)),
-        }
+        let mut state = self.state.lock();
+        let permit = match state.acquire_or_enqueue(params, fair) {
+            Outcome::Acquired(permit) => permit,
+            Outcome::Closed(err) => return Err(TryAcquireError::Closed(err)),
+            Outcome::Poisoned(params) => return Err(TryAcquireError::Poisoned(params)),
+            Outcome::Enqueue { params, .. } => return Err(TryAcquireError::NoPermits(params)),
+        };
+        Ok(permit)
     }
+}
 
+impl<S: SemaphoreState + ?Sized, C: IsCloseable, O: Order> QueueState<S, C, O> {
     /// Grant a permit if we may, otherwise report which end the caller should queue
     /// at. Consults the [`Order`] exactly once, so a stateful order draws once per
     /// acquisition.
+    ///
+    /// # Safety-usable invariant
+    ///
+    /// Enqueue is returned only while queue is Ok. This method never replaces
+    /// the list or changes its identity, including if State or Order panics.
     fn acquire_or_enqueue(&mut self, params: S::Params, fair: bool) -> Outcome<S, C> {
         if self.poisoned {
             return Outcome::Poisoned(params);
