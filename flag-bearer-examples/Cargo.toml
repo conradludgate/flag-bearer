@@ -8,5 +8,5 @@ publish = false
 # their dependencies (e.g. tokio) out of the published crate.
 
 [dev-dependencies]
-flag-bearer = { path = "../flag-bearer", version = "0.1.0-rc.8" }
+flag-bearer = { path = "../flag-bearer", version = "0.1.0-rc.9" }
 tokio = { version = "1", features = ["macros", "rt-multi-thread", "time"] }
