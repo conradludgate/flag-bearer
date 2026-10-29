@@ -11,8 +11,10 @@ extern crate std;
 
 use core::{hint::unreachable_unchecked, task::Waker};
 
+use crate::loom::Mutex;
 use closeable::{Closeable, IsCloseable};
 use flag_bearer_core::SemaphoreState;
+use lock_api::RawMutex;
 use pin_list::PinList;
 
 pub mod acquire;
@@ -25,8 +27,126 @@ pub use order::{FairOrder, Hybrid, Order};
 
 /// A queue that manages the acquisition of permits from a [`SemaphoreState`], or queues tasks
 /// if no permits are available.
+///
+/// `R` selects the [`RawMutex`] implementation. The mutex and queue state are
+/// private so an outstanding acquire always accesses its original list.
+///
+/// Replacing a borrowed queue is rejected at compile time:
+///
+/// ```compile_fail,E0502
+/// use flag_bearer_core::SemaphoreState;
+/// use flag_bearer_mutex::RawMutex;
+/// use flag_bearer_queue::{SemaphoreQueue, FairOrder, closeable::Closeable};
+/// # struct State;
+/// # impl SemaphoreState for State {
+/// #     type Params = ();
+/// #     type Permit = ();
+/// #     fn acquire(&mut self, _: ()) -> Result<(), ()> { Err(()) }
+/// #     fn release(&mut self, _: ()) {}
+/// # }
+/// let mut queue = SemaphoreQueue::<RawMutex, _, Closeable>::new(State, FairOrder::Fifo);
+/// let acquire = queue.acquire(());
+/// let replacement = SemaphoreQueue::new(State, FairOrder::Fifo);
+/// let original = core::mem::replace(&mut queue, replacement);
+/// drop(acquire);
+/// ```
+///
+/// The internal mutex cannot be used to replace the list either:
+///
+/// ```compile_fail,E0616
+/// use flag_bearer_core::SemaphoreState;
+/// use flag_bearer_mutex::RawMutex;
+/// use flag_bearer_queue::{SemaphoreQueue, FairOrder, closeable::Closeable};
+/// # struct State;
+/// # impl SemaphoreState for State {
+/// #     type Params = ();
+/// #     type Permit = ();
+/// #     fn acquire(&mut self, _: ()) -> Result<(), ()> { Err(()) }
+/// #     fn release(&mut self, _: ()) {}
+/// # }
+/// let queue = SemaphoreQueue::<RawMutex, _, Closeable>::new(State, FairOrder::Fifo);
+/// let guard = queue.state.lock();
+/// ```
+#[repr(transparent)]
+pub struct SemaphoreQueue<R: RawMutex, S: SemaphoreState + ?Sized, C: IsCloseable, O = FairOrder> {
+    // Safety invariant: Every usable initialized Acquire borrowing this mutex
+    // originates from its list. The QueueState cannot be replaced through a
+    // shared borrow, and an Err queue has no linked nodes.
+    state: Mutex<R, QueueState<S, C, O>>,
+}
+
+impl<R: RawMutex, S: SemaphoreState, C: IsCloseable, O> SemaphoreQueue<R, S, C, O> {
+    /// Construct a queue with its own mutex, state and ordering policy.
+    #[inline]
+    pub fn new(state: S, order: O) -> Self {
+        Self {
+            state: Mutex::new(QueueState {
+                state,
+                order,
+                poisoned: false,
+                len: 0,
+                // SAFETY: DebugChecked IDs may only be compared within their
+                // originating list. The private mutex never exposes QueueState;
+                // Acquire borrows it and only registers/resets its own node in
+                // this list. Public callbacks access S, not the list. Closing
+                // removes all nodes before discarding the list, so no future
+                // can reach a different list or compare IDs from another new().
+                queue: Ok(PinList::new(unsafe { pin_list::id::DebugChecked::new() })),
+            }),
+        }
+    }
+}
+
+impl<R: RawMutex, S: SemaphoreState + ?Sized, C: IsCloseable, O> SemaphoreQueue<R, S, C, O> {
+    /// Inspect or modify the application state, then service queued acquires.
+    #[inline]
+    pub fn with_state<T>(&self, f: impl FnOnce(&mut S) -> T) -> T {
+        self.state.lock().with_state(f)
+    }
+
+    /// Check whether this queue is closed.
+    #[inline]
+    pub fn is_closed(&self) -> bool {
+        C::CLOSE && self.state.lock().is_closed()
+    }
+
+    /// Check whether a state callback has poisoned the queue.
+    #[inline]
+    pub fn is_poisoned(&self) -> bool {
+        self.state.lock().is_poisoned()
+    }
+
+    /// Clear poison after inspecting and repairing the application state.
+    ///
+    /// This does not itself service queued acquires. Follow it with a
+    /// [`with_state`](Self::with_state) call to recheck existing waiters.
+    #[inline]
+    pub fn clear_poison(&self) {
+        self.state.lock().clear_poison();
+    }
+}
+
+impl<R: RawMutex, S: SemaphoreState + ?Sized, O> SemaphoreQueue<R, S, Closeable, O> {
+    /// Close the queue, rejecting new requests and waking queued acquires.
+    #[inline]
+    pub fn close(&self) {
+        self.state.lock().close();
+    }
+}
+
+impl<R: RawMutex, S: SemaphoreState + core::fmt::Debug, C: IsCloseable, O> core::fmt::Debug
+    for SemaphoreQueue<R, S, C, O>
+{
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        match self.state.try_lock() {
+            Some(state) => state.fmt(f),
+            None => f.write_str("<locked>"),
+        }
+    }
+}
+
 // don't question the weird bounds here...
-pub struct SemaphoreQueue<
+struct QueueState<
     S: SemaphoreState<Params = Params, Permit = Permit> + ?Sized,
     C: IsCloseable,
     O = FairOrder,
@@ -34,6 +154,9 @@ pub struct SemaphoreQueue<
     Permit = <S as SemaphoreState>::Permit,
 > {
     #[allow(clippy::type_complexity)]
+    // Safety invariant: Initialized acquires borrowing the containing mutex
+    // access only this list. Err is stored only after all nodes are removed;
+    // an open list is never replaced with another list.
     queue: Result<PinList<PinQueue<Params, Permit, C>>, C::Closed<()>>,
     /// Set if a panic ever escaped user code (`SemaphoreState::acquire` or a
     /// `with_state` closure) while we held the state, which may have left `state`
@@ -62,7 +185,7 @@ impl Drop for PoisonOnUnwind<'_> {
 }
 
 impl<S: SemaphoreState + core::fmt::Debug, C: IsCloseable, O> core::fmt::Debug
-    for SemaphoreQueue<S, C, O>
+    for QueueState<S, C, O>
 {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         let mut d = f.debug_struct("SemaphoreQueue");
@@ -91,22 +214,7 @@ type PinQueue<Params, Permit, C> = dyn pin_list::Types<
         Unprotected = (),
     >;
 
-impl<S: SemaphoreState, C: IsCloseable, O> SemaphoreQueue<S, C, O> {
-    /// Construct a new semaphore queue, with the given [`SemaphoreState`] and [`Order`].
-    pub fn new(state: S, order: O) -> Self {
-        Self {
-            state,
-            order,
-            poisoned: false,
-            len: 0,
-            // Safety: during acquire, we ensure that nodes in this queue
-            // will never attempt to use a different queue to read the nodes.
-            queue: Ok(PinList::new(unsafe { pin_list::id::DebugChecked::new() })),
-        }
-    }
-}
-
-impl<S: SemaphoreState + ?Sized, C: IsCloseable, O> SemaphoreQueue<S, C, O> {
+impl<S: SemaphoreState + ?Sized, C: IsCloseable, O> QueueState<S, C, O> {
     /// Access the state with mutable access.
     ///
     /// This gives direct access to the state, be careful not to
@@ -152,7 +260,9 @@ impl<S: SemaphoreState + ?Sized, C: IsCloseable, O> SemaphoreQueue<S, C, O> {
                         waker.wake();
                         self.len -= 1;
                     }
-                    // Safety: with protected_mut, we have just made sure it is in the list
+                    // SAFETY: protected_mut established that the cursor is on
+                    // a node. acquire can mutate only S and cannot replace the
+                    // private list; remove_current therefore cannot fail.
                     Err(_) => unsafe { unreachable_unchecked() },
                 },
                 Err(params) => {
@@ -192,11 +302,17 @@ impl<S: SemaphoreState + ?Sized, C: IsCloseable, O> SemaphoreQueue<S, C, O> {
     }
 }
 
-impl<S: SemaphoreState + ?Sized, O> SemaphoreQueue<S, Closeable, O> {
+impl<S: SemaphoreState + ?Sized, O> QueueState<S, Closeable, O> {
     /// Close the semaphore queue.
     ///
     /// All tasks currently waiting to acquire a token will immediately stop.
     /// No new acquire attempts will succeed.
+    ///
+    /// # Safety-usable invariant
+    ///
+    /// Err is stored in queue only after every linked node has entered the
+    /// removed state. If a waker panics, queue remains Ok and pin-list's
+    /// fallback still leaves the affected node removed.
     pub fn close(&mut self) {
         let Ok(queue) = &mut self.queue else {
             return;
@@ -245,12 +361,11 @@ mod loom_tests {
         loom::model(|| {
             use std::sync::Arc;
 
-            let s = Arc::new(crate::loom::Mutex::<parking_lot::RawMutex, _>::new(
-                SemaphoreQueue::<NeverSucceeds, Closeable>::new(
-                    NeverSucceeds,
-                    crate::FairOrder::Fifo,
-                ),
-            ));
+            let s = Arc::new(SemaphoreQueue::<
+                parking_lot::RawMutex,
+                NeverSucceeds,
+                Closeable,
+            >::new(NeverSucceeds, crate::FairOrder::Fifo));
 
             let s2 = s.clone();
             let handle = loom::thread::spawn(move || {
@@ -259,7 +374,7 @@ mod loom_tests {
                 })
             });
 
-            s.lock().close();
+            s.close();
 
             handle.join().unwrap();
         });

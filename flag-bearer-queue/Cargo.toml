@@ -16,10 +16,11 @@ lock_api = "0.4"
 [dev-dependencies]
 pollster = "0.4"
 flag-bearer = { path = "../flag-bearer" }
+flag-bearer-mutex = { path = "../flag-bearer-mutex" }
+parking_lot = "0.12"
 
 [target.'cfg(loom)'.dev-dependencies]
 loom = { version = "0.7.2", features = ["futures"] }
-parking_lot = "0.12"
 
 [lints.rust]
 unexpected_cfgs = { level = "allow", check-cfg = ['cfg(loom)'] }
