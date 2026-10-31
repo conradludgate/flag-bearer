@@ -27,8 +27,8 @@ pin_project_lite::pin_project! {
         #[pin]
         // Safety invariant: While initialized, this node is linked to or has
         // been removed from state's original list. No other list is used to
-        // inspect or reset it. QueueState::close removes all linked nodes
-        // before discarding that list.
+        // inspect or reset it. QueueState::close_one discards the list only
+        // after all linked nodes have been removed.
         node: Node<PinQueue<S::Params, S::Permit, C>>,
         state: &'a Mutex<R, QueueState<S, C, O>>,
         params: Option<S::Params>,
@@ -46,20 +46,18 @@ pin_project_lite::pin_project! {
             let Some(node) = this.node.initialized_mut() else {
                 return;
             };
-            let mut state = this.state.lock();
-            match &mut state.queue {
+            crate::with_queue(this.state, |state| match &mut state.queue {
                 Ok(queue) => {
                     match node.reset(queue).0 {
                         // We were granted a permit but never claimed it; return it.
                         NodeData::Removed(Ok(permit)) => {
-                            state.with_state(|state| state.release(permit));
+                            state.update_state(|state| state.release(permit));
                         }
                         // We were still queued and have now left the queue. If we were
                         // a head-of-line blocker, the waiters behind us may now be
                         // serviceable, so re-check.
                         NodeData::Linked(_) => {
                             state.len -= 1;
-                            state.check();
                         }
                         NodeData::Removed(Err(_closed)) => {}
                     }
@@ -67,16 +65,16 @@ pin_project_lite::pin_project! {
                 Err(_closed) => {
                     // SAFETY: By Acquire::node's invariant this initialized
                     // node originates from this mutex's list. The private mutex
-                    // prevents replacing QueueState, and QueueState::close's
+                    // prevents replacing QueueState, and QueueState::close_one's
                     // safety-usable invariant ensures all nodes are removed
                     // before queue becomes Err. Taking leaves node initial,
                     // so it cannot be taken or dropped again as initialized.
                     let (permit, ()) = unsafe { node.take_removed_unchecked() };
                     if let Ok(permit) = permit {
-                        state.with_state(|state| state.release(permit));
+                        state.update_state(|state| state.release(permit));
                     }
                 }
-            }
+            });
         }
     }
 }
@@ -126,6 +124,26 @@ impl<S: SemaphoreState + ?Sized, C: IsCloseable, O: Order, R: RawMutex> Future
             }
         };
 
+        let init = if C::CLOSE && state.closed {
+            if let Ok(queue) = &mut state.queue {
+                match init.unlink(queue) {
+                    Ok(((params, waker), ())) => {
+                        state.len -= 1;
+                        drop(state);
+                        drop(waker);
+                        return Poll::Ready(Err(C::new_err(params.expect(
+                            "params should be set. likely the SemaphoreState::acquire method panicked",
+                        ))));
+                    }
+                    Err(init) => init,
+                }
+            } else {
+                init
+            }
+        } else {
+            init
+        };
+
         if let Ok(queue) = &mut state.queue
             && let Some((_, waker)) = init.protected_mut(queue)
         {
@@ -135,9 +153,10 @@ impl<S: SemaphoreState + ?Sized, C: IsCloseable, O: Order, R: RawMutex> Future
         }
 
         // SAFETY: Acquire::node's invariant ties this node to the original
-        // list in this private mutex. With an open queue, protected_mut returned
-        // None, which pin-list guarantees means removed. With a closed queue,
-        // QueueState::close's safety-usable invariant establishes removal.
+        // list in this private mutex. With a retained list (queue Ok), the
+        // closed-state unlink either returned above or left a removed node,
+        // and protected_mut returned None. With a discarded list (queue Err),
+        // close_one's safety-usable invariant establishes removal of all nodes.
         // The mutex excludes concurrent transitions. Taking leaves node initial
         // before user code runs or poll returns, preventing a second extraction.
         let (permit, ()) = unsafe { init.take_removed_unchecked() };
@@ -212,6 +231,9 @@ impl<S: SemaphoreState + ?Sized, C: IsCloseable, O: Order> QueueState<S, C, O> {
     fn acquire_or_enqueue(&mut self, params: S::Params, fair: bool) -> Outcome<S, C> {
         if self.poisoned {
             return Outcome::Poisoned(params);
+        }
+        if C::CLOSE && self.closed {
+            return Outcome::Closed(C::new_err(params));
         }
         let empty = match &self.queue {
             Ok(queue) => queue.is_empty(),

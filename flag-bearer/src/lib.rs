@@ -619,6 +619,9 @@ where
     ///
     /// All tasks currently waiting to acquire a token will immediately stop.
     /// No new acquire attempts will succeed.
+    ///
+    /// Closing takes effect before invoking any waker. If a waker panics, the
+    /// semaphore remains closed; call close again to notify remaining waiters.
     pub fn close(&self) {
         self.state.close();
     }
