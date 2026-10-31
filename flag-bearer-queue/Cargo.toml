@@ -12,6 +12,7 @@ pin-list = { version = "0.1", default-features = false }
 pin-project-lite = "0.2"
 cfg-if = "1"
 lock_api = "0.4"
+arrayvec = { version = "0.7", default-features = false }
 
 [dev-dependencies]
 pollster = "0.4"

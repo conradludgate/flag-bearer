@@ -78,6 +78,19 @@ fn wake_panic_keeps_queue_length(closing: bool) {
     }));
     assert!(result.is_err());
 
+    if closing {
+        // Close is committed before notifications. A panicking waker cannot
+        // reopen admission, and polling/retrying close still drains all nodes.
+        assert!(sem.is_closed());
+        let mut third = Box::pin(sem.acquire(()));
+        assert!(matches!(third.as_mut().poll(&mut cx), Poll::Ready(Err(_))));
+        assert!(matches!(second.as_mut().poll(&mut cx), Poll::Ready(Err(_))));
+        drop(first);
+        sem.close();
+        assert_eq!(sem.with_state(|state| state.available), 0);
+        return;
+    }
+
     // One node has been removed before wake() unwinds. Only `second` remains.
     let mut third = Box::pin(sem.acquire(()));
     assert!(third.as_mut().poll(&mut cx).is_pending());
@@ -103,7 +116,7 @@ fn granting_wake_panic_keeps_queue_length() {
 }
 
 #[test]
-fn closing_wake_panic_keeps_queue_length() {
+fn closing_wake_panic_keeps_queue_closed() {
     wake_panic_keeps_queue_length(true);
 }
 

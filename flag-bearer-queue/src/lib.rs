@@ -84,6 +84,7 @@ impl<R: RawMutex, S: SemaphoreState, C: IsCloseable, O> SemaphoreQueue<R, S, C, 
                 state,
                 order,
                 poisoned: false,
+                closed: false,
                 len: 0,
                 // SAFETY: DebugChecked IDs may only be compared within their
                 // originating list. The private mutex never exposes QueueState;
@@ -99,9 +100,12 @@ impl<R: RawMutex, S: SemaphoreState, C: IsCloseable, O> SemaphoreQueue<R, S, C, 
 
 impl<R: RawMutex, S: SemaphoreState + ?Sized, C: IsCloseable, O> SemaphoreQueue<R, S, C, O> {
     /// Inspect or modify the application state, then service queued acquires.
+    ///
+    /// Wakes run without the mutex. Other operations may interleave between
+    /// batches of queued acquires.
     #[inline]
     pub fn with_state<T>(&self, f: impl FnOnce(&mut S) -> T) -> T {
-        self.state.lock().with_state(f)
+        with_queue(&self.state, |state| state.update_state(f))
     }
 
     /// Check whether this queue is closed.
@@ -128,9 +132,109 @@ impl<R: RawMutex, S: SemaphoreState + ?Sized, C: IsCloseable, O> SemaphoreQueue<
 
 impl<R: RawMutex, S: SemaphoreState + ?Sized, O> SemaphoreQueue<R, S, Closeable, O> {
     /// Close the queue, rejecting new requests and waking queued acquires.
+    ///
+    /// Closing takes effect before invoking any waker. If a waker panics, the
+    /// queue remains closed; calling close again notifies remaining waiters.
     #[inline]
     pub fn close(&self) {
-        self.state.lock().close();
+        let mut wakes = WakeBatch::new();
+        loop {
+            let mut state = self.state.lock();
+            while !wakes.is_full() {
+                let Some(waker) = state.close_one() else {
+                    break;
+                };
+                wakes.push(waker);
+            }
+            let more = state.queue.is_ok();
+            // All collected nodes are removed; no list borrow crosses unlock.
+            drop(state);
+            wakes.wake_all();
+            if !more {
+                return;
+            }
+        }
+    }
+}
+
+// Each entry owns the waker of an already-removed node. Removing an entry
+// before invoking it lets Drop notify the rest if a wake or state callback
+// panics. Always declare this before the mutex guard so unwinding unlocks first.
+struct WakeBatch {
+    wakers: arrayvec::ArrayVec<Waker, 32>,
+}
+
+impl WakeBatch {
+    fn new() -> Self {
+        Self {
+            wakers: arrayvec::ArrayVec::new(),
+        }
+    }
+
+    fn is_full(&self) -> bool {
+        self.wakers.is_full()
+    }
+
+    fn push(&mut self, waker: Waker) {
+        self.wakers.push(waker);
+    }
+
+    #[inline]
+    fn wake_all(&mut self) {
+        // Drain yields each owned waker exactly once, in queue order. Its drop
+        // alone would discard the rest on panic, so retain a wake-on-drop guard.
+        let mut remaining = WakeRemaining(self.wakers.drain(..));
+        remaining.wake_all();
+    }
+}
+
+impl Drop for WakeBatch {
+    fn drop(&mut self) {
+        self.wake_all();
+    }
+}
+
+struct WakeRemaining<I: Iterator<Item = Waker>>(I);
+
+impl<I: Iterator<Item = Waker>> WakeRemaining<I> {
+    #[inline]
+    fn wake_all(&mut self) {
+        for waker in self.0.by_ref() {
+            waker.wake();
+        }
+    }
+}
+
+impl<I: Iterator<Item = Waker>> Drop for WakeRemaining<I> {
+    fn drop(&mut self) {
+        self.wake_all();
+    }
+}
+
+// No cursor/node borrow escapes the locked section. Between batches callbacks
+// may poll, cancel, enqueue or close; subsequent batches inspect fresh state.
+fn with_queue<R: RawMutex, S: SemaphoreState + ?Sized, C: IsCloseable, O, T>(
+    mutex: &Mutex<R, QueueState<S, C, O>>,
+    f: impl FnOnce(&mut QueueState<S, C, O>) -> T,
+) -> T {
+    let mut state = mutex.lock();
+    let result = f(&mut state);
+    if state.len == 0 {
+        return result;
+    }
+    let mut wakes = WakeBatch::new();
+    // Move the guard after the batch so an acquire panic unlocks before waking
+    // waiters that were already removed earlier in this batch.
+    let mut state = state;
+    loop {
+        state.check(&mut wakes);
+        let more = wakes.is_full() && state.len != 0;
+        drop(state);
+        wakes.wake_all();
+        if !more {
+            return result;
+        }
+        state = mutex.lock();
     }
 }
 
@@ -164,6 +268,10 @@ struct QueueState<
     /// half-updated. We can't tell a clean panic from a corrupting one, so — like
     /// [`std::sync::Mutex`] — we assume the worst until `clear_poison`.
     poisoned: bool,
+    /// Logical close state. Set before waking anyone, so callbacks cannot extend
+    /// close indefinitely by enqueuing new waiters. queue may remain Ok while
+    /// closing drains nodes, but all acquisition paths already reject new work.
+    closed: bool,
     /// Number of tasks currently waiting in `queue`. Tracked here because the
     /// intrusive list has no `len()`, and size-dependent [`Order`]s need it.
     len: usize,
@@ -222,22 +330,23 @@ impl<S: SemaphoreState + ?Sized, C: IsCloseable, O> QueueState<S, C, O> {
     /// break any of your own state invariants. You can use this
     /// to peek at the current state, or to modify it, eg to add or
     /// remove permits from the semaphore.
-    pub fn with_state<T>(&mut self, f: impl FnOnce(&mut S) -> T) -> T {
+    fn update_state<T>(&mut self, f: impl FnOnce(&mut S) -> T) -> T {
         // A panic in `f` may leave `state` half-updated, so poison if it unwinds.
         let guard = PoisonOnUnwind(&mut self.poisoned);
         let res = f(&mut self.state);
         core::mem::forget(guard);
 
-        self.check();
         res
     }
 
     #[inline]
-    fn check(&mut self) {
-        if self.poisoned {
+    fn check(&mut self, wakes: &mut WakeBatch) {
+        if self.poisoned || (C::CLOSE && self.closed) {
             return;
         }
-        let Ok(queue) = &mut self.queue else { return };
+        let Ok(queue) = &mut self.queue else {
+            return;
+        };
         let mut leader = queue.cursor_front_mut();
         while let Some(p) = leader.protected_mut() {
             let Some(params) = p.0.take() else {
@@ -259,7 +368,10 @@ impl<S: SemaphoreState + ?Sized, C: IsCloseable, O> QueueState<S, C, O> {
                 Ok(permit) => match leader.remove_current(Ok(permit)) {
                     Ok((_, waker)) => {
                         self.len -= 1;
-                        waker.wake();
+                        wakes.push(waker);
+                        if wakes.is_full() {
+                            return;
+                        }
                     }
                     // SAFETY: protected_mut established that the cursor is on
                     // a node. acquire can mutate only S and cannot replace the
@@ -276,13 +388,13 @@ impl<S: SemaphoreState + ?Sized, C: IsCloseable, O> QueueState<S, C, O> {
 
     /// Check if the queue is closed
     pub fn is_closed(&self) -> bool {
-        self.queue.is_err()
+        self.closed
     }
 
     /// Check if the queue has been poisoned.
     ///
     /// A queue becomes poisoned if a panic unwinds out of [`SemaphoreState::acquire`],
-    /// [`SemaphoreState::release`] or a [`with_state`](Self::with_state) closure,
+    /// [`SemaphoreState::release`] or a [`SemaphoreQueue::with_state`] closure,
     /// which may have left the state
     /// half-updated. Poisoning persists until [`clear_poison`](Self::clear_poison).
     /// A poisoned queue stops granting permits; new acquire attempts surface the
@@ -294,7 +406,7 @@ impl<S: SemaphoreState + ?Sized, C: IsCloseable, O> QueueState<S, C, O> {
     /// Clear the poison flag, letting the queue grant permits again.
     ///
     /// The caller is responsible for ensuring the state is consistent first (e.g.
-    /// inspect/repair it with [`with_state`](Self::with_state)); like
+    /// inspect/repair it with [`SemaphoreQueue::with_state`]); like
     /// [`std::sync::Mutex::clear_poison`], this does not itself touch the state.
     ///
     /// A blocking acquire whose `acquire` impl panicked lost its params and can
@@ -313,33 +425,33 @@ impl<S: SemaphoreState + ?Sized, O> QueueState<S, Closeable, O> {
     /// # Safety-usable invariant
     ///
     /// Err is stored in queue only after every linked node has entered the
-    /// removed state. If a waker panics, queue remains Ok and pin-list's
-    /// fallback still leaves the affected node removed.
-    pub fn close(&mut self) {
+    /// removed state. The returned waker is owned and its node is already
+    /// removed; the caller must release the mutex before waking it. closed is
+    /// set before returning, so no new acquire can extend the drain.
+    fn close_one(&mut self) -> Option<Waker> {
+        self.closed = true;
         let Ok(queue) = &mut self.queue else {
-            return;
+            return None;
         };
 
-        let mut cursor = queue.cursor_front_mut();
-        while cursor.remove_current_with_or(
-            |(params, waker)| {
-                // The node is already unlinked when this closure runs. Keep
-                // the count consistent even if the caller's waker panics.
-                self.len -= 1;
-                waker.wake();
+        let mut waker = None;
+        {
+            let mut cursor = queue.cursor_front_mut();
+            cursor.remove_current_with_or(
+                |(params, removed_waker)| {
+                    self.len -= 1;
+                    waker = Some(removed_waker);
+                    Err(params)
+                },
+                || Err(None),
+            );
+        }
 
-                Err(params)
-            },
-            || Err(None),
-        ) {}
-
-        debug_assert!(queue.is_empty());
-
-        // It's important that we only mark the queue as closed when we have ensured that
-        // all linked nodes are removed.
-        // If we did this early, we could panic and not dequeue every node.
-        self.queue = Err(());
-        debug_assert_eq!(self.len, 0);
+        if queue.is_empty() {
+            self.queue = Err(());
+            debug_assert_eq!(self.len, 0);
+        }
+        waker
     }
 }
 
