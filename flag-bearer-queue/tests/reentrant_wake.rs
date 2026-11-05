@@ -3,7 +3,7 @@ use std::{
     panic::{AssertUnwindSafe, catch_unwind},
     sync::{
         Arc, Mutex,
-        atomic::{AtomicUsize, Ordering},
+        atomic::{AtomicBool, AtomicUsize, Ordering},
         mpsc,
     },
     task::{Context, Poll, Wake, Waker},
@@ -68,6 +68,159 @@ fn finish(operation: impl FnOnce(), helper: JoinHandle<()>) {
     // during unwinding. Join the helper before failing instead of hanging CI.
     helper.join().unwrap();
     assert!(result.is_ok(), "wake callback could not reenter the queue");
+}
+
+struct DropCallback {
+    reenter: Reenter,
+    completed: Arc<AtomicBool>,
+}
+
+impl Drop for DropCallback {
+    fn drop(&mut self) {
+        self.reenter.start.send(()).unwrap();
+        self.reenter
+            .done
+            .lock()
+            .unwrap()
+            .recv_timeout(TIMEOUT)
+            .unwrap();
+        self.completed.store(true, Ordering::Relaxed);
+    }
+}
+
+// This waker's last-owner destructor, rather than wake(), is under test.
+#[allow(clippy::manual_noop_waker)]
+impl Wake for DropCallback {
+    fn wake(self: Arc<Self>) {}
+}
+
+fn drop_callback(
+    action: impl FnOnce() + Send + 'static,
+) -> (DropCallback, Arc<AtomicBool>, JoinHandle<()>) {
+    let (start, run) = mpsc::channel();
+    let (finished, done) = mpsc::channel();
+    let helper = thread::spawn(move || {
+        run.recv().unwrap();
+        action();
+        finished.send(()).unwrap();
+    });
+    let completed = Arc::new(AtomicBool::new(false));
+    (
+        DropCallback {
+            reenter: Reenter {
+                start,
+                done: Mutex::new(done),
+            },
+            completed: Arc::clone(&completed),
+        },
+        completed,
+        helper,
+    )
+}
+
+#[test]
+fn cancellation_drops_the_registered_waker_outside_the_lock() {
+    let queue = Arc::new(Queue::new(Counter(0), FairOrder::Fifo));
+    let reentry = Arc::clone(&queue);
+    let (callback, completed, helper) = drop_callback(move || assert!(!reentry.is_closed()));
+    let waker = Waker::from(Arc::new(callback));
+    let mut waiter = Box::pin(queue.acquire(1));
+    assert!(
+        waiter
+            .as_mut()
+            .poll(&mut Context::from_waker(&waker))
+            .is_pending()
+    );
+    drop(waker); // The queue now owns the last reference to the Wake value.
+    finish(|| drop(waiter), helper);
+    assert!(completed.load(Ordering::Relaxed));
+}
+
+fn cancellation_drops_unused_params(closing: bool) {
+    struct Blocked;
+    impl SemaphoreState for Blocked {
+        type Params = DropCallback;
+        type Permit = ();
+        fn acquire(&mut self, params: DropCallback) -> Result<(), DropCallback> {
+            Err(params)
+        }
+        fn release(&mut self, (): ()) {}
+    }
+    let queue = Arc::new(SemaphoreQueue::<RawMutex, _, Closeable>::new(
+        Blocked,
+        FairOrder::Fifo,
+    ));
+    let reentry = Arc::clone(&queue);
+    let (params, completed, helper) =
+        drop_callback(move || assert_eq!(reentry.is_closed(), closing));
+    let mut waiter = Box::pin(queue.acquire(params));
+    assert!(
+        waiter
+            .as_mut()
+            .poll(&mut Context::from_waker(Waker::noop()))
+            .is_pending()
+    );
+    if closing {
+        queue.close();
+    }
+    finish(|| drop(waiter), helper);
+    assert!(completed.load(Ordering::Relaxed));
+}
+
+#[test]
+fn cancellation_drops_unused_params_outside_the_lock() {
+    cancellation_drops_unused_params(false);
+}
+
+#[test]
+fn cancellation_drops_closed_params_outside_the_lock() {
+    cancellation_drops_unused_params(true);
+}
+
+#[test]
+fn cancellation_unlocks_before_dropping_data_when_check_panics() {
+    struct PanicAcquire(Arc<AtomicBool>);
+    impl SemaphoreState for PanicAcquire {
+        type Params = usize;
+        type Permit = ();
+        fn acquire(&mut self, params: usize) -> Result<(), usize> {
+            assert!(!self.0.load(Ordering::Relaxed), "acquire panicked");
+            Err(params)
+        }
+        fn release(&mut self, (): ()) {}
+    }
+    let armed = Arc::new(AtomicBool::new(false));
+    let queue = Arc::new(SemaphoreQueue::<RawMutex, _, Closeable>::new(
+        PanicAcquire(Arc::clone(&armed)),
+        FairOrder::Fifo,
+    ));
+    let reentry = Arc::clone(&queue);
+    let (callback, completed, helper) = drop_callback(move || assert!(!reentry.is_closed()));
+    let waker = Waker::from(Arc::new(callback));
+    let mut first = Box::pin(queue.acquire(1));
+    let mut next = Box::pin(queue.acquire(1));
+    assert!(
+        first
+            .as_mut()
+            .poll(&mut Context::from_waker(&waker))
+            .is_pending()
+    );
+    assert!(
+        next.as_mut()
+            .poll(&mut Context::from_waker(Waker::noop()))
+            .is_pending()
+    );
+    drop(waker);
+    armed.store(true, Ordering::Relaxed);
+    let result = catch_unwind(AssertUnwindSafe(|| drop(first)));
+    helper.join().unwrap();
+    assert!(result.is_err());
+    assert!(
+        completed.load(Ordering::Relaxed),
+        "destructor could not reenter the queue"
+    );
+    assert!(queue.is_poisoned());
+    drop(next);
 }
 
 #[test]
