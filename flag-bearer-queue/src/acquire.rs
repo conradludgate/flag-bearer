@@ -46,9 +46,14 @@ pin_project_lite::pin_project! {
             let Some(node) = this.node.initialized_mut() else {
                 return;
             };
+            // Keep abandoned params and the waker outside with_queue's stack:
+            // their destructors may reenter, even if checking the next waiter
+            // panics. Unwinding must release the mutex before dropping them.
+            let mut abandoned = None;
             crate::with_queue(this.state, |state| match &mut state.queue {
                 Ok(queue) => {
-                    match node.reset(queue).0 {
+                    let node_data = node.reset(queue).0;
+                    match node_data {
                         // We were granted a permit but never claimed it; return it.
                         NodeData::Removed(Ok(permit)) => {
                             state.update_state(|state| state.release(permit));
@@ -58,8 +63,9 @@ pin_project_lite::pin_project! {
                         // serviceable, so re-check.
                         NodeData::Linked(_) => {
                             state.len -= 1;
+                            abandoned = Some(node_data);
                         }
-                        NodeData::Removed(Err(_closed)) => {}
+                        NodeData::Removed(Err(_)) => abandoned = Some(node_data),
                     }
                 }
                 Err(_closed) => {
@@ -70,8 +76,9 @@ pin_project_lite::pin_project! {
                     // before queue becomes Err. Taking leaves node initial,
                     // so it cannot be taken or dropped again as initialized.
                     let (permit, ()) = unsafe { node.take_removed_unchecked() };
-                    if let Ok(permit) = permit {
-                        state.update_state(|state| state.release(permit));
+                    match permit {
+                        Ok(permit) => state.update_state(|state| state.release(permit)),
+                        Err(params) => abandoned = Some(NodeData::Removed(Err(params))),
                     }
                 }
             });
