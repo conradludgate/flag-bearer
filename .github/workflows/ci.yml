@@ -1,0 +1,40 @@
+name: CI
+
+on: [push, pull_request]
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+          targets: x86_64-unknown-none
+      - run: cargo fmt --all -- --check
+      - run: cargo clippy --workspace --all-targets --locked -- -D warnings
+      - run: cargo test --workspace --locked
+      - run: cargo check --locked -p flag-bearer-queue --target x86_64-unknown-none
+
+  miri:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        include:
+          - model: stacked
+            flags: -Zmiri-strict-provenance
+          - model: tree
+            flags: -Zmiri-strict-provenance -Zmiri-tree-borrows
+    name: Cancellation safety (${{ matrix.model }})
+    env:
+      MIRIFLAGS: ${{ matrix.flags }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: nightly-2026-10-24
+          components: miri, rust-src
+      - run: cargo miri test --locked -p flag-bearer-queue --test reentrant_wake
